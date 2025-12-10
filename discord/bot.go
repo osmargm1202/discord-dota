@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -102,6 +103,12 @@ func (b *Bot) registerCommands() error {
 							Description: "ID de Dota o número de resultado de búsqueda",
 							Required:    true,
 						},
+						{
+							Type:        discordgo.ApplicationCommandOptionUser,
+							Name:        "usuario",
+							Description: "Usuario de Discord a registrar (opcional, por defecto te registras tú)",
+							Required:    false,
+						},
 					},
 				},
 				{
@@ -129,6 +136,11 @@ func (b *Bot) registerCommands() error {
 							Required:    true,
 						},
 					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "rank",
+					Description: "Ver ranking de jugadores registrados",
 				},
 				{
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
@@ -196,6 +208,8 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 		b.handleRegisterSlash(s, i, subcommand)
 	case "stats":
 		b.handleStatsSlash(s, i, subcommand)
+	case "rank":
+		b.handleRankSlash(s, i)
 	case "channel":
 		b.handleChannelSlash(s, i, subcommand)
 	case "help":
@@ -281,7 +295,7 @@ func (b *Bot) handleSearchSlash(s *discordgo.Session, i *discordgo.InteractionCr
 		msg.WriteString("\n")
 	}
 
-	msg.WriteString("Usa `/dota register account_id:<número>` para registrar un jugador")
+	msg.WriteString("Usa `/dota register account_id:<número>` para registrar un jugador\nO `/dota register account_id:<número> usuario:@amigo` para registrar a otro usuario")
 
 	b.sendFollowup(s, i, msg.String())
 }
@@ -289,10 +303,13 @@ func (b *Bot) handleSearchSlash(s *discordgo.Session, i *discordgo.InteractionCr
 func (b *Bot) handleRegisterSlash(s *discordgo.Session, i *discordgo.InteractionCreate, subcommand *discordgo.ApplicationCommandInteractionDataOption) {
 	// Obtener el parámetro "account_id"
 	var accountIDInput string
+	var targetUser *discordgo.User
+	
 	for _, option := range subcommand.Options {
 		if option.Name == "account_id" {
 			accountIDInput = option.StringValue()
-			break
+		} else if option.Name == "usuario" {
+			targetUser = option.UserValue(s)
 		}
 	}
 
@@ -306,6 +323,7 @@ func (b *Bot) handleRegisterSlash(s *discordgo.Session, i *discordgo.Interaction
 	// Verificar si es un número (resultado de búsqueda)
 	if num, err := strconv.Atoi(accountIDInput); err == nil && num > 0 && num <= 10 {
 		// Es un número, buscar en cache
+		// Usar el usuario que ejecuta el comando para el cache (no el target)
 		cacheKey := i.Member.User.ID
 		if i.Member == nil && i.User != nil {
 			cacheKey = i.User.ID
@@ -335,11 +353,31 @@ func (b *Bot) handleRegisterSlash(s *discordgo.Session, i *discordgo.Interaction
 		return
 	}
 
-	// Registrar usuario
-	userID := i.Member.User.ID
-	if i.Member == nil && i.User != nil {
-		userID = i.User.ID
+	// Determinar qué usuario registrar
+	var userID string
+	var discordUsername string
+	
+	if targetUser != nil {
+		// Registrar al usuario especificado
+		userID = targetUser.ID
+		discordUsername = targetUser.Username
+		getLogger().Debugf("Registrando usuario especificado: %s (%s)", discordUsername, userID)
+	} else {
+		// Registrar al usuario que ejecuta el comando
+		if i.Member != nil && i.Member.User != nil {
+			userID = i.Member.User.ID
+			discordUsername = i.Member.User.Username
+		} else if i.User != nil {
+			userID = i.User.ID
+			discordUsername = i.User.Username
+		} else {
+			b.sendFollowup(s, i, "❌ No se pudo identificar al usuario")
+			return
+		}
+		getLogger().Debugf("Registrando usuario que ejecuta el comando: %s (%s)", discordUsername, userID)
 	}
+
+	// Registrar usuario
 	if err := b.userStore.Set(userID, accountID); err != nil {
 		getLogger().Errorf("Error guardando usuario: %v", err)
 		b.sendFollowup(s, i, "❌ Error guardando registro")
@@ -349,14 +387,6 @@ func (b *Bot) handleRegisterSlash(s *discordgo.Session, i *discordgo.Interaction
 	personaname := profile.Profile.Personaname
 	if personaname == "" {
 		personaname = "Jugador"
-	}
-
-	// Obtener nombre del usuario de Discord
-	discordUsername := "Usuario"
-	if i.Member != nil && i.Member.User != nil {
-		discordUsername = i.Member.User.Username
-	} else if i.User != nil {
-		discordUsername = i.User.Username
 	}
 
 	b.sendFollowup(s, i, fmt.Sprintf("✅ **%s** (Discord) asociado con **%s** (Dota 2)\nID de Dota: %s", discordUsername, personaname, accountID))
@@ -586,6 +616,191 @@ func (b *Bot) handleChannelSlash(s *discordgo.Session, i *discordgo.InteractionC
 	getLogger().Infof("Canal de notificaciones configurado: %s", channelID)
 }
 
+func (b *Bot) handleRankSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Obtener todos los usuarios registrados
+	allUsers := b.userStore.GetAll()
+	
+	if len(allUsers) == 0 {
+		b.sendFollowup(s, i, "❌ No hay usuarios registrados. Usa `/dota register` para registrar jugadores.")
+		return
+	}
+
+	// Estructura para almacenar información de ranking
+	type RankEntry struct {
+		DiscordID   string
+		DiscordName string
+		Personaname string
+		MMR         float64
+		RankTier    *int
+		AccountID   string
+		AvatarURL   string
+	}
+
+	var entries []RankEntry
+
+	// Obtener información de cada usuario
+	for discordID, accountID := range allUsers {
+		// Obtener perfil del jugador
+		profile, err := b.dotaClient.GetPlayerProfile(accountID)
+		if err != nil {
+			getLogger().Warnf("Error obteniendo perfil para account_id %s: %v", accountID, err)
+			continue
+		}
+
+		// Obtener nombre de Discord
+		discordName := "Usuario desconocido"
+		user, err := s.User(discordID)
+		if err == nil && user != nil {
+			discordName = user.Username
+		}
+
+		// Extraer información
+		personaname := profile.Profile.Personaname
+		if personaname == "" {
+			personaname = "Jugador"
+		}
+
+		mmr := 0.0
+		if profile.ComputedMMR != nil {
+			mmr = *profile.ComputedMMR
+		}
+
+		// Obtener avatar (preferir Steam, fallback a Discord)
+		avatarURL := profile.Profile.Avatarfull
+		if avatarURL == "" {
+			avatarURL = profile.Profile.Avatar
+		}
+		// Si no hay avatar de Steam, usar avatar de Discord
+		if avatarURL == "" {
+			if user != nil && user.Avatar != "" {
+				avatarURL = user.AvatarURL("")
+			}
+		}
+
+		entries = append(entries, RankEntry{
+			DiscordID:   discordID,
+			DiscordName: discordName,
+			Personaname: personaname,
+			MMR:         mmr,
+			RankTier:    profile.RankTier,
+			AccountID:   accountID,
+			AvatarURL:   avatarURL,
+		})
+	}
+
+	if len(entries) == 0 {
+		b.sendFollowup(s, i, "❌ No se pudo obtener información de los usuarios registrados.")
+		return
+	}
+
+	// Ordenar: primero por RankTier (mayor es mejor), luego por MMR (mayor es mejor)
+	// Usamos sort.Slice para ordenar de menor a mayor (último al primero)
+	for i := 0; i < len(entries)-1; i++ {
+		for j := i + 1; j < len(entries); j++ {
+			// Comparar RankTier primero
+			rankI := 0
+			rankJ := 0
+			if entries[i].RankTier != nil {
+				rankI = *entries[i].RankTier
+			}
+			if entries[j].RankTier != nil {
+				rankJ = *entries[j].RankTier
+			}
+
+			// Si tienen el mismo rango, comparar por MMR
+			if rankI == rankJ {
+				if entries[i].MMR < entries[j].MMR {
+					entries[i], entries[j] = entries[j], entries[i]
+				}
+			} else if rankI < rankJ {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+		}
+	}
+
+	// Construir múltiples embeds con imágenes de jugadores
+	// Discord permite hasta 10 embeds por mensaje
+	var embeds []*discordgo.MessageEmbed
+
+	// Embed principal con título
+	mainEmbed := &discordgo.MessageEmbed{
+		Title:       "🏆 Ranking de Jugadores",
+		Description: fmt.Sprintf("Total de jugadores: %d\nOrdenado por rango y MMR (menor a mayor)\n\n", len(entries)),
+		Color:       0xFFD700, // Color dorado
+	}
+	embeds = append(embeds, mainEmbed)
+
+	// Discord limita a 10 embeds por mensaje, así que limitamos a 9 jugadores (1 para el título)
+	maxEntries := len(entries)
+	if maxEntries > 9 {
+		maxEntries = 9
+	}
+
+	for idx := 0; idx < maxEntries; idx++ {
+		entry := entries[idx]
+		position := idx + 1
+		
+		// Obtener nombre del rango
+		rankName := "Unranked"
+		if entry.RankTier != nil {
+			rankName = dota.GetRankName(entry.RankTier)
+		}
+
+		// Formatear MMR
+		mmrText := "N/A"
+		if entry.MMR > 0 {
+			mmrText = fmt.Sprintf("%.0f", entry.MMR)
+		}
+
+		// Emoji según posición
+		emoji := "🥉"
+		if position == 1 {
+			emoji = "🥇"
+		} else if position == 2 {
+			emoji = "🥈"
+		} else if position == 3 {
+			emoji = "🥉"
+		}
+
+		// Construir descripción del jugador
+		var desc strings.Builder
+		desc.WriteString(fmt.Sprintf("%s **#%d**\n", emoji, position))
+		desc.WriteString(fmt.Sprintf("**%s** (@%s)\n", entry.Personaname, entry.DiscordName))
+		desc.WriteString(fmt.Sprintf("MMR: **%s**\n", mmrText))
+		desc.WriteString(fmt.Sprintf("Rango: **%s**", rankName))
+
+		// Crear embed para este jugador
+		playerEmbed := &discordgo.MessageEmbed{
+			Title:       fmt.Sprintf("#%d - %s", position, entry.Personaname),
+			Description: desc.String(),
+			Color:       0x3498db,
+			Thumbnail: &discordgo.MessageEmbedThumbnail{
+				URL: entry.AvatarURL,
+			},
+		}
+
+		embeds = append(embeds, playerEmbed)
+	}
+
+	if len(entries) > 9 {
+		// Agregar embed final con información de jugadores restantes
+		remainingEmbed := &discordgo.MessageEmbed{
+			Description: fmt.Sprintf("... y %d jugador(es) más", len(entries)-9),
+			Color:       0x95a5a6,
+		}
+		embeds = append(embeds, remainingEmbed)
+	}
+
+	// Enviar múltiples embeds
+	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Embeds: embeds,
+	})
+	if err != nil {
+		getLogger().Errorf("Error enviando embeds de ranking: %v", err)
+		b.sendFollowup(s, i, "❌ Error mostrando ranking")
+	}
+}
+
 func (b *Bot) handleHelpSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	embed := &discordgo.MessageEmbed{
 		Title:       "🎮 Comandos del Bot de Dota 2",
@@ -605,6 +820,11 @@ func (b *Bot) handleHelpSlash(s *discordgo.Session, i *discordgo.InteractionCrea
 			{
 				Name:   "/dota stats [usuario:<@usuario>]",
 				Value:  "Estadísticas de las últimas 20 partidas del usuario registrado (victorias/derrotas/racha).\n**Ejemplos:** `/dota stats` · `/dota stats usuario:@amigo`",
+				Inline: false,
+			},
+			{
+				Name:   "/dota rank",
+				Value:  "Muestra el ranking de todos los jugadores registrados, ordenados por MMR y rango (del menor al mayor).",
 				Inline: false,
 			},
 			{
@@ -1170,6 +1390,212 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 			Value:  rankName,
 			Inline: true,
 		})
+	}
+
+	// Agregar lista de jugadores con perfiles públicos verificados
+	type VerifiedPlayer struct {
+		Player     dota.Player
+		HeroName   string
+		PlayerName string
+		Profile    *dota.PlayersResponse
+		WinLoss    *dota.WinLossResponse
+	}
+
+	var verifiedPlayers []VerifiedPlayer
+	var playersToCheck []dota.Player
+
+	// Primero filtrar por AccountID != 0
+	for _, p := range match.Players {
+		if p.AccountID != 0 {
+			playersToCheck = append(playersToCheck, p)
+		}
+	}
+
+	getLogger().Debugf("Verificando %d jugadores con AccountID != 0 para perfil público (en paralelo)", len(playersToCheck))
+
+	// Usar goroutines para verificar jugadores en paralelo
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	verifiedPlayersChan := make(chan VerifiedPlayer, len(playersToCheck))
+
+	// Verificar cada jugador en una goroutine separada
+	for _, p := range playersToCheck {
+		wg.Add(1)
+		go func(player dota.Player) {
+			defer wg.Done()
+
+			accountIDStr := strconv.Itoa(player.AccountID)
+			getLogger().Debugf("Verificando jugador AccountID: %d, HeroID: %d, Personaname: '%s'", player.AccountID, player.HeroID, player.Personaname)
+
+			// Intentar obtener el perfil del jugador
+			playerProfile, err := b.dotaClient.GetPlayerProfile(accountIDStr)
+			if err != nil {
+				getLogger().Debugf("  ❌ No se pudo obtener perfil para AccountID %d: %v", player.AccountID, err)
+				return
+			}
+
+			// Verificar que el perfil tenga datos válidos
+			if playerProfile == nil {
+				getLogger().Debugf("  ❌ Perfil nulo para AccountID %d", player.AccountID)
+				return
+			}
+
+			// Verificar que tenga información del perfil
+			if playerProfile.Profile.AccountID == 0 {
+				getLogger().Debugf("  ❌ Perfil sin AccountID válido para AccountID %d", player.AccountID)
+				return
+			}
+
+			// Intentar obtener W/L de las últimas 20 partidas para verificar que el perfil es completamente público
+			wl, err := b.dotaClient.GetWinLoss(accountIDStr, 20)
+			if err != nil {
+				getLogger().Debugf("  ❌ No se pudo obtener W/L para AccountID %d (perfil no completamente público): %v", player.AccountID, err)
+				return
+			}
+
+			if wl == nil {
+				getLogger().Debugf("  ❌ W/L nulo para AccountID %d (perfil no completamente público)", player.AccountID)
+				return
+			}
+
+			// Obtener nombre del héroe
+			heroName := b.dotaClient.GetHeroName(player.HeroID)
+			
+			// Obtener nombre del jugador (preferir del perfil, luego del player, luego AccountID)
+			playerName := ""
+			if playerProfile.Profile.Personaname != "" {
+				playerName = playerProfile.Profile.Personaname
+			} else if player.Personaname != "" {
+				playerName = player.Personaname
+			} else {
+				playerName = fmt.Sprintf("Jugador %d", player.AccountID)
+			}
+
+			getLogger().Debugf("  ✅ Perfil público verificado: AccountID %d, Nombre: '%s', Héroe: '%s', W/L: %d/%d", 
+				player.AccountID, playerName, heroName, wl.Win, wl.Lose)
+
+			// Enviar jugador verificado al channel
+			verifiedPlayersChan <- VerifiedPlayer{
+				Player:     player,
+				HeroName:   heroName,
+				PlayerName: playerName,
+				Profile:    playerProfile,
+				WinLoss:    wl,
+			}
+		}(p)
+	}
+
+	// Esperar a que todas las goroutines terminen
+	go func() {
+		wg.Wait()
+		close(verifiedPlayersChan)
+	}()
+
+	// Recopilar resultados del channel
+	for vp := range verifiedPlayersChan {
+		mu.Lock()
+		verifiedPlayers = append(verifiedPlayers, vp)
+		mu.Unlock()
+	}
+
+	getLogger().Debugf("Total de jugadores con perfil público verificado: %d de %d", len(verifiedPlayers), len(playersToCheck))
+
+	if len(verifiedPlayers) > 0 {
+		// Separar jugadores por equipo (Radiant: 0-4, Dire: 128-132)
+		var radiantPlayers []VerifiedPlayer
+		var direPlayers []VerifiedPlayer
+
+		for _, vp := range verifiedPlayers {
+			if vp.Player.PlayerSlot < 128 {
+				radiantPlayers = append(radiantPlayers, vp)
+			} else {
+				direPlayers = append(direPlayers, vp)
+			}
+		}
+
+		// Ordenar cada equipo por player_slot
+		sortPlayers := func(players []VerifiedPlayer) {
+			for i := 0; i < len(players)-1; i++ {
+				for j := i + 1; j < len(players); j++ {
+					if players[i].Player.PlayerSlot > players[j].Player.PlayerSlot {
+						players[i], players[j] = players[j], players[i]
+					}
+				}
+			}
+		}
+
+		sortPlayers(radiantPlayers)
+		sortPlayers(direPlayers)
+
+		var playersList strings.Builder
+		const maxFieldLength = 1000 // Dejar margen para el límite de 1024 caracteres
+
+		// Función helper para agregar jugadores a la lista
+		addPlayersToList := func(players []VerifiedPlayer, teamName string) bool {
+			if len(players) == 0 {
+				return true
+			}
+
+			// Agregar encabezado del equipo
+			header := fmt.Sprintf("**%s**\n", teamName)
+			if playersList.Len()+len(header) > maxFieldLength {
+				return false
+			}
+			playersList.WriteString(header)
+
+			for _, vp := range players {
+				dotabuffURL := fmt.Sprintf("https://www.dotabuff.com/players/%d", vp.Player.AccountID)
+				
+				// Formatear W/L
+				wlText := "N/A"
+				if vp.WinLoss != nil {
+					total := vp.WinLoss.Win + vp.WinLoss.Lose
+					if total > 0 {
+						winRate := float64(vp.WinLoss.Win) / float64(total) * 100
+						wlText = fmt.Sprintf("%d/%d (%.1f%%)", vp.WinLoss.Win, vp.WinLoss.Lose, winRate)
+					} else {
+						wlText = "0/0"
+					}
+				}
+				
+				line := fmt.Sprintf("%s | [%s](%s) | ID: %d | W/L: %s\n", 
+					vp.HeroName, vp.PlayerName, dotabuffURL, vp.Player.AccountID, wlText)
+
+				// Verificar si agregar esta línea excedería el límite
+				if playersList.Len()+len(line) > maxFieldLength {
+					playersList.WriteString("... y más")
+					return false
+				}
+
+				playersList.WriteString(line)
+			}
+
+			// Agregar separador entre equipos si hay Dire después
+			if len(direPlayers) > 0 {
+				separator := "\n"
+				if playersList.Len()+len(separator) > maxFieldLength {
+					return false
+				}
+				playersList.WriteString(separator)
+			}
+
+			return true
+		}
+
+		// Agregar primero Radiant, luego Dire
+		if !addPlayersToList(radiantPlayers, "☀️ Radiant") {
+			// Si se excedió el límite, no agregar Dire
+		} else {
+			addPlayersToList(direPlayers, "🌙 Dire")
+		}
+
+		if playersList.Len() > 0 {
+			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+				Name:   "👥 Jugadores (Perfiles Públicos)",
+				Value:  playersList.String(),
+				Inline: false,
+			})
+		}
 	}
 
 	// Agregar racha en el footer

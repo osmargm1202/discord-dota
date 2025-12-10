@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+
+# Data y logs
+data/
+logs/
+
+# Binarios
+dota-discord-bot
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Archivos de Go
+*.test
+*.out
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentación
+*.md
+!README.md
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Scripts
+deploy
+
+# Environment
+.env
+.env.example
+

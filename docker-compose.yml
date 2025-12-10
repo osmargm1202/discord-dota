@@ -1,0 +1,22 @@
+services:
+  dota-discord-bot:
+    image: orgmcr.or-gm.com/osmargm1202/dota-discord-bot:latest
+    container_name: dota-discord-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - REFRESH_RATE=${REFRESH_RATE:-1}
+      - DEBUG=${DEBUG:-false}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "8080:8080"
+    networks:
+      - dota-bot-network
+
+networks:
+  dota-bot-network:
+    driver: bridge
+

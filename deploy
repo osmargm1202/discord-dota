@@ -35,36 +35,3 @@ if [ $? -ne 0 ]; then
     echo -e "${RED}❌ Error subiendo la imagen al registry${NC}"
     exit 1
 fi
-
-# 3. Conectar al servidor y desplegar
-echo -e "${YELLOW}🖥️  Desplegando en servidor ${SERVER}...${NC}"
-ssh ${SERVER} << EOF
-    # Hacer pull de la imagen
-    docker pull ${FULL_IMAGE}
-    
-    # Detener y eliminar contenedor existente si existe
-    docker stop ${IMAGE_NAME} 2>/dev/null || true
-    docker rm ${IMAGE_NAME} 2>/dev/null || true
-    
-    # Ejecutar nuevo contenedor
-    docker run -d \
-        --name ${IMAGE_NAME} \
-        --restart unless-stopped \
-        --env-file /path/to/.env \
-        -e REFRESH_RATE=\${REFRESH_RATE:-1} \
-        -e DEBUG=\${DEBUG:-false} \
-        -v /path/to/data:/app/data \
-        -v /path/to/logs:/app/logs \
-        -p 8080:8080 \
-        ${FULL_IMAGE}
-    
-    echo "✅ Contenedor desplegado exitosamente"
-EOF
-
-if [ $? -ne 0 ]; then
-    echo -e "${RED}❌ Error desplegando en el servidor${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}✅ Deployment completado exitosamente!${NC}"
-

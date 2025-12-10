@@ -12,6 +12,14 @@ Bot de Discord que monitorea partidas de Dota 2 de usuarios registrados y envía
 - 📈 Cálculo de rachas de victorias/derrotas
 - 🎮 Información detallada de partidas (K/D/A, GPM/XPM, daño, etc.)
 
+
+## API utilizada
+
+Este bot utiliza la API de OpenDota para obtener información de jugadores y partidas de Dota 2.
+
+- OpenDota Players API: https://docs.opendota.com/#tag/players
+
+
 ## Requisitos
 
 - Go 1.21 o superior

@@ -126,6 +126,19 @@ func (b *Bot) registerCommands() error {
 				},
 				{
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "update",
+					Description: "Refrescar datos de un jugador por account_id",
+					Options: []*discordgo.ApplicationCommandOption{
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "account_id",
+							Description: "Steam32 account ID del jugador",
+							Required:    true,
+						},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
 					Name:        "channel",
 					Description: "Configurar canal de notificaciones",
 					Options: []*discordgo.ApplicationCommandOption{
@@ -208,6 +221,8 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 		b.handleRegisterSlash(s, i, subcommand)
 	case "stats":
 		b.handleStatsSlash(s, i, subcommand)
+	case "update":
+		b.handleUpdateSlash(s, i, subcommand)
 	case "rank":
 		b.handleRankSlash(s, i)
 	case "channel":
@@ -587,6 +602,92 @@ func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCre
 	}
 
 	b.sendFollowupEmbed(s, i, embed)
+}
+
+// handleUpdateSlash ejecuta POST /players/{account_id}/refresh y devuelve un resumen rápido
+func (b *Bot) handleUpdateSlash(s *discordgo.Session, i *discordgo.InteractionCreate, subcommand *discordgo.ApplicationCommandInteractionDataOption) {
+	accountID := ""
+	if subcommand.Options != nil {
+		for _, option := range subcommand.Options {
+			if option.Name == "account_id" {
+				accountID = option.StringValue()
+				break
+			}
+		}
+	}
+
+	if accountID == "" {
+		b.sendFollowup(s, i, "❌ Uso: `/dota update account_id:<steam32>`")
+		return
+	}
+
+	getLogger().Debugf("Solicitando refresh para account_id %s", accountID)
+
+	if err := b.dotaClient.RefreshPlayer(accountID); err != nil {
+		getLogger().Errorf("Error refrescando jugador %s: %v", accountID, err)
+		b.sendFollowup(s, i, fmt.Sprintf("❌ Error refrescando jugador: %v", err))
+		return
+	}
+
+	// Obtener perfil y W/L para mostrar un resumen inmediato
+	profile, _ := b.dotaClient.GetPlayerProfile(accountID)
+	wl, _ := b.dotaClient.GetWinLoss(accountID, 20)
+
+	personaname := "Jugador"
+	rankText := "N/A"
+	mmrText := "N/A"
+	avatar := ""
+
+	if profile != nil {
+		if profile.Profile.Personaname != "" {
+			personaname = profile.Profile.Personaname
+		}
+		if profile.RankTier != nil {
+			rankText = dota.GetRankName(profile.RankTier)
+		}
+		if profile.ComputedMMR != nil && *profile.ComputedMMR > 0 {
+			mmrText = fmt.Sprintf("%.0f", *profile.ComputedMMR)
+		}
+		avatar = profile.Profile.Avatarfull
+		if avatar == "" {
+			avatar = profile.Profile.Avatar
+		}
+	}
+
+	wlText := "N/A"
+	if wl != nil {
+		total := wl.Win + wl.Lose
+		if total > 0 {
+			winRate := float64(wl.Win) / float64(total) * 100
+			wlText = fmt.Sprintf("%d/%d (%.1f%%)", wl.Win, wl.Lose, winRate)
+		} else {
+			wlText = "0/0"
+		}
+	}
+
+	dotabuffURL := fmt.Sprintf("https://www.dotabuff.com/players/%s", accountID)
+
+	embed := &discordgo.MessageEmbed{
+		Title:     fmt.Sprintf("🔄 Refresh solicitado para %s", personaname),
+		URL:       dotabuffURL,
+		Color:     0x2ecc71,
+		Timestamp: time.Now().Format(time.RFC3339),
+		Fields: []*discordgo.MessageEmbedField{
+			{Name: "Account ID", Value: accountID, Inline: true},
+			{Name: "Nombre", Value: personaname, Inline: true},
+			{Name: "Rango", Value: rankText, Inline: true},
+			{Name: "MMR", Value: mmrText, Inline: true},
+			{Name: "W/L (últ. 20)", Value: wlText, Inline: true},
+			{Name: "Estado", Value: "✅ Refresh ejecutado en OpenDota", Inline: true},
+		},
+	}
+
+	if avatar != "" {
+		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: avatar}
+	}
+
+	b.sendFollowupEmbed(s, i, embed)
+	getLogger().Infof("Refresh ejecutado para account_id %s (%s)", accountID, personaname)
 }
 
 func (b *Bot) handleChannelSlash(s *discordgo.Session, i *discordgo.InteractionCreate, subcommand *discordgo.ApplicationCommandInteractionDataOption) {

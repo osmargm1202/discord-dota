@@ -147,6 +147,32 @@ func (c *Client) makeRequest(url string, result interface{}) error {
 	return nil
 }
 
+// makePostRequest realiza un POST simple sin payload y valida status 200
+func (c *Client) makePostRequest(url string) error {
+	// Rate limiting: esperar 1 segundo entre requests
+	time.Sleep(1 * time.Second)
+
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("error creando request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("error en request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API retornó status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Consumir el body para no dejarlo abierto (aunque no lo usemos)
+	_, _ = io.ReadAll(resp.Body)
+	return nil
+}
+
 func (c *Client) SearchPlayers(query string) ([]SearchResponse, error) {
 	url := fmt.Sprintf("%s/search?q=%s", baseURL, query)
 	var results []SearchResponse
@@ -194,6 +220,12 @@ func (c *Client) GetWinLoss(accountID string, limit int) (*WinLossResponse, erro
 		return nil, err
 	}
 	return &wl, nil
+}
+
+// RefreshPlayer fuerza refresh de historial, medalla y nombre del perfil
+func (c *Client) RefreshPlayer(accountID string) error {
+	url := fmt.Sprintf("%s/players/%s/refresh", baseURL, accountID)
+	return c.makePostRequest(url)
 }
 
 func (c *Client) FindPlayerInMatch(match *MatchResponse, accountID string) (*Player, error) {

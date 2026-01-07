@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -210,10 +211,18 @@ func (c *Client) GetMatchDetails(matchID int64) (*MatchResponse, error) {
 }
 
 // GetWinLoss obtiene el resumen W/L; si limit>0 se envía como query param.
-func (c *Client) GetWinLoss(accountID string, limit int) (*WinLossResponse, error) {
+// Si heroID > 0, filtra por ese héroe específico.
+func (c *Client) GetWinLoss(accountID string, limit int, heroID int) (*WinLossResponse, error) {
 	url := fmt.Sprintf("%s/players/%s/wl", baseURL, accountID)
+	queryParams := []string{}
 	if limit > 0 {
-		url = fmt.Sprintf("%s?limit=%d", url, limit)
+		queryParams = append(queryParams, fmt.Sprintf("limit=%d", limit))
+	}
+	if heroID > 0 {
+		queryParams = append(queryParams, fmt.Sprintf("hero_id=%d", heroID))
+	}
+	if len(queryParams) > 0 {
+		url = fmt.Sprintf("%s?%s", url, strings.Join(queryParams, "&"))
 	}
 	var wl WinLossResponse
 	if err := c.makeRequest(url, &wl); err != nil {

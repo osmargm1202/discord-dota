@@ -74,6 +74,23 @@ func (b *Bot) registerCommands() error {
 		getLogger().Warn("SERVER_ID no configurado en .env, los comandos se registrarán globalmente (puede tardar hasta 1 hora)")
 	}
 
+	// Obtener comandos existentes y eliminarlos primero para asegurar actualización
+	existingCommands, err := b.session.ApplicationCommands(b.session.State.User.ID, guildID)
+	if err == nil {
+		for _, existingCmd := range existingCommands {
+			if existingCmd.Name == "dota" {
+				getLogger().Infof("Eliminando comando existente: /%s", existingCmd.Name)
+				if err := b.session.ApplicationCommandDelete(b.session.State.User.ID, guildID, existingCmd.ID); err != nil {
+					getLogger().Warnf("Error eliminando comando existente '%s': %v", existingCmd.Name, err)
+				} else {
+					getLogger().Infof("✅ Comando eliminado: /%s", existingCmd.Name)
+				}
+			}
+		}
+		// Esperar un momento para que Discord procese la eliminación
+		time.Sleep(1 * time.Second)
+	}
+
 	commands := []*discordgo.ApplicationCommand{
 		{
 			Name:        "dota",
@@ -160,6 +177,11 @@ func (b *Bot) registerCommands() error {
 					Name:        "help",
 					Description: "Mostrar ayuda",
 				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "new",
+					Description: "Verificar nuevas partidas inmediatamente",
+				},
 			},
 		},
 	}
@@ -229,6 +251,8 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 		b.handleChannelSlash(s, i, subcommand)
 	case "help":
 		b.handleHelpSlash(s, i)
+	case "new":
+		b.handleNewSlash(s, i)
 	default:
 		b.sendFollowup(s, i, "❌ Comando no reconocido. Usa `/dota help` para ver los comandos disponibles.")
 	}
@@ -476,8 +500,11 @@ func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCre
 		discordUsername = i.User.Username
 	}
 
+	// Obtener detalles de la partida más reciente para enriquecer el embed
+	latestMatch := recentMatches[0]
+
 	// Obtener W/L de las últimas 20 partidas (endpoint específico)
-	wl, err := b.dotaClient.GetWinLoss(accountID, limit)
+	wl, err := b.dotaClient.GetWinLoss(accountID, limit, 0)
 	if err != nil {
 		getLogger().Warnf("No se pudo obtener W/L: %v", err)
 	}
@@ -491,15 +518,23 @@ func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCre
 		}
 	}
 
-	// Obtener detalles de la partida más reciente para enriquecer el embed
-	latestMatch := recentMatches[0]
+	// Obtener W/L del héroe específico (últimas 20 partidas con ese héroe)
+	heroName := b.dotaClient.GetHeroName(latestMatch.HeroID)
+	heroWL, err := b.dotaClient.GetWinLoss(accountID, 20, latestMatch.HeroID)
+	heroRecordText := "N/A"
+	if err == nil && heroWL != nil {
+		total := heroWL.Win + heroWL.Lose
+		if total > 0 {
+			winRate := float64(heroWL.Win) / float64(total) * 100
+			heroRecordText = fmt.Sprintf("%d-%d (%.1f%%)", heroWL.Win, heroWL.Lose, winRate)
+		}
+	}
 	matchDetails, err := b.dotaClient.GetMatchDetails(latestMatch.MatchID)
 	var playerInMatch *dota.Player
 	if err == nil && matchDetails != nil {
 		playerInMatch, _ = b.dotaClient.FindPlayerInMatch(matchDetails, accountID)
 	}
 
-	heroName := b.dotaClient.GetHeroName(latestMatch.HeroID)
 	heroImg := b.dotaClient.GetHeroImageURL(latestMatch.HeroID)
 	gameMode := "Mode desconocido"
 	lobbyType := "Lobby desconocido"
@@ -536,7 +571,7 @@ func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCre
 		Title:       fmt.Sprintf("📊 [%s](%s)", heroName, matchURL),
 		Description: fmt.Sprintf("Últimas %d partidas\nDiscord: %s\nJugador: %s", limit, discordUsername, personaname),
 		Color:       0x3498db,
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
+		Image: &discordgo.MessageEmbedImage{
 			URL: heroImg,
 		},
 		Fields: []*discordgo.MessageEmbedField{
@@ -591,6 +626,11 @@ func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCre
 				Inline: false,
 			},
 			{
+				Name:   fmt.Sprintf("Record con %s (últ. 20)", heroName),
+				Value:  heroRecordText,
+				Inline: false,
+			},
+			{
 				Name:   "🎯 Racha actual",
 				Value:  streak.CurrentStreak,
 				Inline: false,
@@ -631,7 +671,7 @@ func (b *Bot) handleUpdateSlash(s *discordgo.Session, i *discordgo.InteractionCr
 
 	// Obtener perfil y W/L para mostrar un resumen inmediato
 	profile, _ := b.dotaClient.GetPlayerProfile(accountID)
-	wl, _ := b.dotaClient.GetWinLoss(accountID, 20)
+	wl, _ := b.dotaClient.GetWinLoss(accountID, 20, 0)
 
 	personaname := "Jugador"
 	rankText := "N/A"
@@ -934,6 +974,11 @@ func (b *Bot) handleHelpSlash(s *discordgo.Session, i *discordgo.InteractionCrea
 				Inline: false,
 			},
 			{
+				Name:   "/dota new",
+				Value:  "Verificar nuevas partidas inmediatamente (sin esperar el chequeo automático)",
+				Inline: false,
+			},
+			{
 				Name:   "/dota help",
 				Value:  "Mostrar esta ayuda",
 				Inline: false,
@@ -942,6 +987,22 @@ func (b *Bot) handleHelpSlash(s *discordgo.Session, i *discordgo.InteractionCrea
 	}
 
 	b.sendFollowupEmbed(s, i, embed)
+}
+
+func (b *Bot) handleNewSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	getLogger().Debugf("Comando /dota new ejecutado, verificando nuevas partidas...")
+	
+	// Enviar mensaje de confirmación inmediato
+	b.sendFollowup(s, i, "🔍 Verificando nuevas partidas...")
+	
+	// Ejecutar chequeo de nuevas partidas
+	if err := b.CheckForNewMatches(); err != nil {
+		getLogger().Errorf("Error verificando partidas: %v", err)
+		b.sendFollowup(s, i, fmt.Sprintf("❌ Error verificando partidas: %v", err))
+		return
+	}
+	
+	getLogger().Info("Verificación de nuevas partidas completada")
 }
 
 // Handlers antiguos (mantener por compatibilidad, pero no se usan con slash commands)
@@ -1401,20 +1462,35 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 
 	// Obtener nombre del héroe
 	heroName := b.dotaClient.GetHeroName(player.HeroID)
+	heroImg := b.dotaClient.GetHeroImageURL(player.HeroID)
 
 	// Obtener modo de juego
 	gameModeName := b.dotaClient.GetGameModeName(match.GameMode)
 	lobbyTypeName := b.dotaClient.GetLobbyTypeName(match.LobbyType)
 
+	// Obtener W/L del héroe específico (últimas 20 partidas con ese héroe)
+	heroWL, err := b.dotaClient.GetWinLoss(accountID, 20, player.HeroID)
+	heroRecordText := "N/A"
+	if err == nil && heroWL != nil {
+		total := heroWL.Win + heroWL.Lose
+		if total > 0 {
+			winRate := float64(heroWL.Win) / float64(total) * 100
+			heroRecordText = fmt.Sprintf("%d-%d (%.1f%%)", heroWL.Win, heroWL.Lose, winRate)
+		}
+	}
+
 	// Calcular racha (se usará más abajo)
 	var recentMatches []dota.PlayerRecentMatch
-	recentMatches, err := b.dotaClient.GetRecentMatches(accountID)
+	recentMatches, err = b.dotaClient.GetRecentMatches(accountID)
 
 	// Construir embed
 	embed := &discordgo.MessageEmbed{
 		Title:       fmt.Sprintf("%s - %s", personaname, resultText),
 		Description: fmt.Sprintf("**%s** | %s", heroName, gameModeName),
 		Color:       resultColor,
+		Image: &discordgo.MessageEmbedImage{
+			URL: heroImg,
+		},
 		Thumbnail: &discordgo.MessageEmbedThumbnail{
 			URL: avatarURL,
 		},
@@ -1448,6 +1524,11 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 				Name:   "Modo",
 				Value:  fmt.Sprintf("%s (%s)", gameModeName, lobbyTypeName),
 				Inline: true,
+			},
+			{
+				Name:   fmt.Sprintf("Record con %s (últ. 20)", heroName),
+				Value:  heroRecordText,
+				Inline: false,
 			},
 		},
 		Footer: &discordgo.MessageEmbedFooter{
@@ -1548,7 +1629,7 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 			}
 
 			// Intentar obtener W/L de las últimas 20 partidas para verificar que el perfil es completamente público
-			wl, err := b.dotaClient.GetWinLoss(accountIDStr, 20)
+			wl, err := b.dotaClient.GetWinLoss(accountIDStr, 20, 0)
 			if err != nil {
 				getLogger().Debugf("  ❌ No se pudo obtener W/L para AccountID %d (perfil no completamente público): %v", player.AccountID, err)
 				return
@@ -1556,6 +1637,12 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 
 			if wl == nil {
 				getLogger().Debugf("  ❌ W/L nulo para AccountID %d (perfil no completamente público)", player.AccountID)
+				return
+			}
+
+			// Filtrar jugadores con 0/0 W/L (perfiles sin partidas)
+			if wl.Win+wl.Lose == 0 {
+				getLogger().Debugf("  ❌ Jugador con 0/0 W/L (AccountID %d), omitiendo de la lista", player.AccountID)
 				return
 			}
 

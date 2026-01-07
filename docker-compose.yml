@@ -2,7 +2,7 @@ services:
   dota-discord-bot:
     image: orgmcr.or-gm.com/osmargm1202/dota-discord-bot:latest
     container_name: dota-discord-bot
-    restart: unless-stopped
+    restart: always
     env_file:
       - .env
     environment:

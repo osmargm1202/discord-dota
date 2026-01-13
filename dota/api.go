@@ -224,10 +224,24 @@ func (c *Client) GetWinLoss(accountID string, limit int, heroID int) (*WinLossRe
 	if len(queryParams) > 0 {
 		url = fmt.Sprintf("%s?%s", url, strings.Join(queryParams, "&"))
 	}
+	
+	// Debug: log de la URL construida cuando se filtra por héroe
+	if heroID > 0 {
+		fmt.Printf("[DEBUG] GetWinLoss con hero_id: URL=%s, accountID=%s, limit=%d, heroID=%d\n", url, accountID, limit, heroID)
+	}
+	
 	var wl WinLossResponse
 	if err := c.makeRequest(url, &wl); err != nil {
+		if heroID > 0 {
+			fmt.Printf("[DEBUG] Error en GetWinLoss con hero_id: %v\n", err)
+		}
 		return nil, err
 	}
+	
+	if heroID > 0 {
+		fmt.Printf("[DEBUG] GetWinLoss con hero_id exitoso: Win=%d, Lose=%d\n", wl.Win, wl.Lose)
+	}
+	
 	return &wl, nil
 }
 

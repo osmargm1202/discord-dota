@@ -522,12 +522,19 @@ func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCre
 	heroName := b.dotaClient.GetHeroName(latestMatch.HeroID)
 	heroWL, err := b.dotaClient.GetWinLoss(accountID, 20, latestMatch.HeroID)
 	heroRecordText := "N/A"
-	if err == nil && heroWL != nil {
+	if err != nil {
+		getLogger().Warnf("No se pudo obtener W/L del héroe %s (ID: %d) para account_id %s: %v", heroName, latestMatch.HeroID, accountID, err)
+	} else if heroWL != nil {
 		total := heroWL.Win + heroWL.Lose
 		if total > 0 {
 			winRate := float64(heroWL.Win) / float64(total) * 100
 			heroRecordText = fmt.Sprintf("%d-%d (%.1f%%)", heroWL.Win, heroWL.Lose, winRate)
+			getLogger().Debugf("Record del héroe %s para account_id %s: %s", heroName, accountID, heroRecordText)
+		} else {
+			getLogger().Debugf("Héroe %s (ID: %d) para account_id %s: sin partidas registradas", heroName, latestMatch.HeroID, accountID)
 		}
+	} else {
+		getLogger().Warnf("W/L del héroe %s (ID: %d) para account_id %s retornó nil", heroName, latestMatch.HeroID, accountID)
 	}
 	matchDetails, err := b.dotaClient.GetMatchDetails(latestMatch.MatchID)
 	var playerInMatch *dota.Player
@@ -1471,12 +1478,19 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 	// Obtener W/L del héroe específico (últimas 20 partidas con ese héroe)
 	heroWL, err := b.dotaClient.GetWinLoss(accountID, 20, player.HeroID)
 	heroRecordText := "N/A"
-	if err == nil && heroWL != nil {
+	if err != nil {
+		getLogger().Warnf("No se pudo obtener W/L del héroe %s (ID: %d) para account_id %s en notificación: %v", heroName, player.HeroID, accountID, err)
+	} else if heroWL != nil {
 		total := heroWL.Win + heroWL.Lose
 		if total > 0 {
 			winRate := float64(heroWL.Win) / float64(total) * 100
 			heroRecordText = fmt.Sprintf("%d-%d (%.1f%%)", heroWL.Win, heroWL.Lose, winRate)
+			getLogger().Debugf("Record del héroe %s para account_id %s en notificación: %s", heroName, accountID, heroRecordText)
+		} else {
+			getLogger().Debugf("Héroe %s (ID: %d) para account_id %s en notificación: sin partidas registradas", heroName, player.HeroID, accountID)
 		}
+	} else {
+		getLogger().Warnf("W/L del héroe %s (ID: %d) para account_id %s en notificación retornó nil", heroName, player.HeroID, accountID)
 	}
 
 	// Calcular racha (se usará más abajo)

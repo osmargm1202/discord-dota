@@ -68,11 +68,12 @@ type StratzMatch struct {
 	DidRadiantWin     bool             `json:"didRadiantWin"`
 	DurationSeconds   int              `json:"durationSeconds"`
 	StartDateTime     int64            `json:"startDateTime"`
-	GameMode          stratzIntOrStr   `json:"gameMode"`       // Stratz puede devolver int o string (enum)
-	LobbyType         stratzIntOrStr   `json:"lobbyType"`      // Stratz puede devolver int o string (enum)
-	RadiantKills      stratzIntOrArray `json:"radiantKills"`   // Stratz puede devolver int o array
-	DireKills         stratzIntOrArray `json:"direKills"`      // Stratz puede devolver int o array
-	ParsedDateTime    *int64           `json:"parsedDateTime"` // Long; si no es null y > 0, la partida está parseada
+	GameMode          stratzIntOrStr   `json:"gameMode"`        // Stratz puede devolver int o string (enum)
+	LobbyType         stratzIntOrStr   `json:"lobbyType"`       // Stratz puede devolver int o string (enum)
+	RadiantKills      stratzIntOrArray `json:"radiantKills"`    // Stratz puede devolver int o array
+	DireKills         stratzIntOrArray `json:"direKills"`       // Stratz puede devolver int o array
+	ParsedDateTime    *int64           `json:"parsedDateTime"`  // Long; si no es null y > 0, la partida está parseada
+	AnalysisOutcome   string           `json:"analysisOutcome"` // NONE, STOMPED, COMEBACK, CLOSE_GAME
 	Players           []StratzPlayer   `json:"players"`
 	TopLaneOutcome    string           `json:"topLaneOutcome"`    // TIE, RADIANT_VICTORY, RADIANT_STOMP, DIRE_VICTORY, DIRE_STOMP
 	MidLaneOutcome    string           `json:"midLaneOutcome"`    // idem
@@ -182,8 +183,10 @@ type StratzPlayer struct {
 	HeroDamage          int                 `json:"heroDamage"`
 	TowerDamage         int                 `json:"towerDamage"`
 	HeroHealing         int                 `json:"heroHealing"`
-	Lane                string              `json:"lane"` // enum SAFE_LANE, MID_LANE, OFF_LANE o vacío
-	Role                string              `json:"role"` // enum CORE, SUPPORT o vacío
+	Imp                 int                 `json:"imp"`   // Individual Match Performance (Stratz)
+	Award               string              `json:"award"` // NONE, MVP, TOP_CORE, TOP_SUPPORT
+	Lane                string              `json:"lane"`  // enum SAFE_LANE, MID_LANE, OFF_LANE o vacío
+	Role                string              `json:"role"`  // enum CORE, SUPPORT o vacío
 	SteamAccount        *StratzSteamAccount `json:"steamAccount"`
 }
 
@@ -317,6 +320,7 @@ func (c *StratzClient) GetMatch(matchID int64) (*StratzMatch, error) {
 				radiantKills
 				direKills
 				parsedDateTime
+				analysisOutcome
 				topLaneOutcome
 				midLaneOutcome
 				bottomLaneOutcome
@@ -335,6 +339,8 @@ func (c *StratzClient) GetMatch(matchID int64) (*StratzMatch, error) {
 					heroDamage
 					towerDamage
 					heroHealing
+					imp
+					award
 					steamAccount {
 						id
 						name
@@ -696,6 +702,7 @@ func StratzMatchToMatchResponse(m *StratzMatch) *MatchResponse {
 		LobbyType:         int(m.LobbyType),
 		RadiantScore:      radiantScore,
 		DireScore:         direScore,
+		AnalysisOutcome:   m.AnalysisOutcome,
 		Players:           players,
 		TopLaneOutcome:    m.TopLaneOutcome,
 		MidLaneOutcome:    m.MidLaneOutcome,
@@ -752,6 +759,8 @@ func StratzPlayerToPlayer(sp *StratzPlayer, radiantWin bool, radiantIdx, direIdx
 		TowerDamage: sp.TowerDamage,
 		HeroHealing: sp.HeroHealing,
 		KDA:         kda,
+		Imp:         sp.Imp,
+		Award:       sp.Award,
 		Lane:        sp.Lane,
 		Role:        sp.Role,
 	}

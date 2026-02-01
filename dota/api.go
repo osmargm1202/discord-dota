@@ -79,6 +79,7 @@ type MatchResponse struct {
 	LobbyType         int      `json:"lobby_type"`
 	RadiantScore      int      `json:"radiant_score"`
 	DireScore         int      `json:"dire_score"`
+	AnalysisOutcome   string   `json:"analysis_outcome"` // NONE, STOMPED, COMEBACK, CLOSE_GAME
 	Players           []Player `json:"players"`
 	TopLaneOutcome    string   `json:"top_lane_outcome"`    // TIE, RADIANT_VICTORY, RADIANT_STOMP, DIRE_VICTORY, DIRE_STOMP
 	MidLaneOutcome    string   `json:"mid_lane_outcome"`    // idem
@@ -104,6 +105,8 @@ type Player struct {
 	TowerDamage int     `json:"tower_damage"`
 	HeroHealing int     `json:"hero_healing"`
 	KDA         float64 `json:"kda"`
+	Imp         int     `json:"imp"`   // Individual Match Performance (Stratz)
+	Award       string  `json:"award"` // NONE, MVP, TOP_CORE, TOP_SUPPORT
 	RankTier    *int    `json:"rank_tier"`
 	Lane        string  `json:"lane"` // lane/rol del jugador (Stratz: SAFE_LANE, MID_LANE, etc.)
 	Role        string  `json:"role"` // CORE, SUPPORT, etc.

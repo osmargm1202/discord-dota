@@ -6,6 +6,7 @@ import (
 	"dota-discord-bot/storage"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1119,6 +1120,28 @@ func (b *Bot) RunStatsScheduler() {
 	}
 }
 
+// formatIMP formatea el IMP (Individual Match Performance) con signo, ej. "+8" o "-10".
+func formatIMP(imp int) string {
+	if imp >= 0 {
+		return fmt.Sprintf("+%d", imp)
+	}
+	return strconv.Itoa(imp)
+}
+
+// formatAnalysisOutcome devuelve el texto del tipo de victoria para el título (NONE = "", STOMPED = "Paliza", COMEBACK = "Comeback", CLOSE_GAME = "Juego pegado").
+func formatAnalysisOutcome(outcome string) string {
+	switch strings.ToUpper(outcome) {
+	case "STOMPED":
+		return "Paliza"
+	case "COMEBACK":
+		return "Comeback"
+	case "CLOSE_GAME":
+		return "Juego pegado"
+	default:
+		return ""
+	}
+}
+
 // formatLaneOutcomeEnum devuelve texto en español para LaneOutcomeEnums de Stratz.
 func formatLaneOutcomeEnum(outcome string) string {
 	switch strings.ToUpper(outcome) {
@@ -1312,10 +1335,13 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 	// Lane outcome: resumen por línea y victoria/derrota en fase de línea (si jugó una línea; jungle/roaming no se marca)
 	lanePhaseLine, laneSummary := b.buildLaneOutcomeText(match, player)
 
-	// Título: nombre [RANGO] - Victoria/Derrota (rango solo si está disponible)
+	// Título: nombre [RANGO] - Victoria/Derrota — Tipo (Paliza/Comeback/Juego pegado; NONE = no añadir nada)
 	title := fmt.Sprintf("%s - %s", personaname, resultText)
 	if profile != nil && profile.RankBracket != "" {
 		title = fmt.Sprintf("%s [%s] - %s", personaname, profile.RankBracket, resultText)
+	}
+	if victoryType := formatAnalysisOutcome(match.AnalysisOutcome); victoryType != "" {
+		title += " — " + victoryType
 	}
 
 	description := fmt.Sprintf("**%s** | %s", heroName, gameModeDisplayName)
@@ -1360,6 +1386,11 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 			{
 				Name:   "Modo",
 				Value:  gameModeDisplayName,
+				Inline: true,
+			},
+			{
+				Name:   "IMP",
+				Value:  formatIMP(player.Imp),
 				Inline: true,
 			},
 			{
@@ -1506,47 +1537,46 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 
 	getLogger().Debugf("Total de jugadores verificados: %d de %d", len(verifiedPlayers), len(playersToCheck))
 
-	if len(verifiedPlayers) > 0 {
-		// Separar jugadores por equipo (Radiant: 0-4, Dire: 128-132)
-		var radiantPlayers []VerifiedPlayer
-		var direPlayers []VerifiedPlayer
+	// Mapa AccountID -> VerifiedPlayer para enlazar nombre y W/L en la lista de todos los jugadores
+	verifiedByAccountID := make(map[int]VerifiedPlayer)
+	for _, vp := range verifiedPlayers {
+		verifiedByAccountID[vp.Player.AccountID] = vp
+	}
 
-		for _, vp := range verifiedPlayers {
-			if vp.Player.PlayerSlot < 128 {
-				radiantPlayers = append(radiantPlayers, vp)
-			} else {
-				direPlayers = append(direPlayers, vp)
-			}
+	// Listar todos los jugadores de la partida: Héroe (IMP: ±N) | [Nombre](link) W/L si perfil público
+	allPlayers := make([]dota.Player, len(match.Players))
+	copy(allPlayers, match.Players)
+	sort.Slice(allPlayers, func(i, j int) bool { return allPlayers[i].PlayerSlot < allPlayers[j].PlayerSlot })
+
+	var radiantSlots, direSlots []dota.Player
+	for _, p := range allPlayers {
+		if p.PlayerSlot < 128 {
+			radiantSlots = append(radiantSlots, p)
+		} else {
+			direSlots = append(direSlots, p)
 		}
+	}
 
-		// Ordenar cada equipo por player_slot
-		sortPlayers := func(players []VerifiedPlayer) {
-			for i := 0; i < len(players)-1; i++ {
-				for j := i + 1; j < len(players); j++ {
-					if players[i].Player.PlayerSlot > players[j].Player.PlayerSlot {
-						players[i], players[j] = players[j], players[i]
-					}
-				}
-			}
+	var playersList strings.Builder
+	const maxFieldLength = 1024
+	appendTeam := func(players []dota.Player, teamName string) bool {
+		if len(players) == 0 {
+			return true
 		}
-
-		sortPlayers(radiantPlayers)
-		sortPlayers(direPlayers)
-
-		// Un solo campo en el mensaje principal: Héroe | Jugador | W/L (antes del footer)
-		var playersList strings.Builder
-		const maxFieldLength = 1000
-		addPlayersToList := func(players []VerifiedPlayer, teamName string) bool {
-			if len(players) == 0 {
-				return true
+		header := fmt.Sprintf("**%s**\n", teamName)
+		if playersList.Len()+len(header) > maxFieldLength {
+			return false
+		}
+		playersList.WriteString(header)
+		for _, p := range players {
+			heroName := b.dotaClient.GetHeroName(p.HeroID)
+			if heroName == "" {
+				heroName = fmt.Sprintf("Hero %d", p.HeroID)
 			}
-			header := fmt.Sprintf("**%s**\n", teamName)
-			if playersList.Len()+len(header) > maxFieldLength {
-				return false
-			}
-			playersList.WriteString(header)
-			for _, vp := range players {
-				stratzURL := fmt.Sprintf("https://stratz.com/players/%d", vp.Player.AccountID)
+			impStr := formatIMP(p.Imp)
+			line := fmt.Sprintf("%s (IMP: %s)", heroName, impStr)
+			if vp, ok := verifiedByAccountID[p.AccountID]; ok {
+				stratzURL := fmt.Sprintf("https://stratz.com/players/%d", p.AccountID)
 				wlText := "N/A"
 				if vp.WinLoss != nil {
 					total := vp.WinLoss.Win + vp.WinLoss.Lose
@@ -1555,24 +1585,27 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 						wlText = fmt.Sprintf("%d/%d (%.1f%%)", vp.WinLoss.Win, vp.WinLoss.Lose, winRate)
 					}
 				}
-				line := fmt.Sprintf("%s | [%s](%s) | W/L: %s\n", vp.HeroName, vp.PlayerName, stratzURL, wlText)
-				if playersList.Len()+len(line) > maxFieldLength {
-					playersList.WriteString("... y más")
-					return false
-				}
-				playersList.WriteString(line)
+				line += fmt.Sprintf(" | [%s](%s) | W/L: %s", vp.PlayerName, stratzURL, wlText)
+			} else {
+				line += " | —"
 			}
-			return true
+			line += "\n"
+			if playersList.Len()+len(line) > maxFieldLength {
+				playersList.WriteString("... y más")
+				return false
+			}
+			playersList.WriteString(line)
 		}
-		addPlayersToList(radiantPlayers, "☀️ Radiant")
-		addPlayersToList(direPlayers, "🌙 Dire")
-		if playersList.Len() > 0 {
-			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-				Name:   "👥 Jugadores (Perfiles Públicos)",
-				Value:  playersList.String(),
-				Inline: false,
-			})
-		}
+		return true
+	}
+	appendTeam(radiantSlots, "☀️ Radiant")
+	appendTeam(direSlots, "🌙 Dire")
+	if playersList.Len() > 0 {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+			Name:   "👥 Jugadores (Héroe + IMP; perfil público = nombre y W/L)",
+			Value:  playersList.String(),
+			Inline: false,
+		})
 	}
 
 	// Agregar racha en el footer (desde Stratz)

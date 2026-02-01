@@ -4,6 +4,7 @@ import (
 	"dota-discord-bot/config"
 	"dota-discord-bot/dota"
 	"dota-discord-bot/storage"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -14,14 +15,17 @@ import (
 )
 
 type Bot struct {
-	session     *discordgo.Session
-	dotaClient  *dota.Client
-	userStore   *storage.UserStore
-	config      *config.Config
-	searchCache map[string][]dota.SearchResponse // Cache temporal de búsquedas por usuario
+	session      *discordgo.Session
+	dotaClient   *dota.Client
+	stratzClient *dota.StratzClient
+	userStore    *storage.UserStore
+	config       *config.Config
+	searchCache  map[string][]dota.SearchResponse // Cache temporal de búsquedas por usuario
+	lastStatsDay string                           // fecha (2006-01-02) del último envío diario de stats
+	statsMu      sync.Mutex                       // protege lastStatsDay
 }
 
-func NewBot(cfg *config.Config, dotaClient *dota.Client, userStore *storage.UserStore) (*Bot, error) {
+func NewBot(cfg *config.Config, dotaClient *dota.Client, stratzClient *dota.StratzClient, userStore *storage.UserStore) (*Bot, error) {
 	if err := InitLogger(cfg.Debug); err != nil {
 		return nil, fmt.Errorf("error inicializando logger: %w", err)
 	}
@@ -32,11 +36,12 @@ func NewBot(cfg *config.Config, dotaClient *dota.Client, userStore *storage.User
 	}
 
 	bot := &Bot{
-		session:     session,
-		dotaClient:  dotaClient,
-		userStore:   userStore,
-		config:      cfg,
-		searchCache: make(map[string][]dota.SearchResponse),
+		session:      session,
+		dotaClient:   dotaClient,
+		stratzClient: stratzClient,
+		userStore:    userStore,
+		config:       cfg,
+		searchCache:  make(map[string][]dota.SearchResponse),
 	}
 
 	// Cambiar a interactionCreate para manejar slash commands
@@ -130,32 +135,6 @@ func (b *Bot) registerCommands() error {
 				},
 				{
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "stats",
-					Description: "Ver estadísticas de partidas",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionUser,
-							Name:        "usuario",
-							Description: "Usuario del que ver estadísticas (opcional)",
-							Required:    false,
-						},
-					},
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "update",
-					Description: "Refrescar datos de un jugador por account_id",
-					Options: []*discordgo.ApplicationCommandOption{
-						{
-							Type:        discordgo.ApplicationCommandOptionString,
-							Name:        "account_id",
-							Description: "Steam32 account ID del jugador",
-							Required:    true,
-						},
-					},
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
 					Name:        "channel",
 					Description: "Configurar canal de notificaciones",
 					Options: []*discordgo.ApplicationCommandOption{
@@ -169,18 +148,13 @@ func (b *Bot) registerCommands() error {
 				},
 				{
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "rank",
-					Description: "Ver ranking de jugadores registrados",
+					Name:        "stats",
+					Description: "Estadísticas por héroe en el parche actual (W/L, % victorias)",
 				},
 				{
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
 					Name:        "help",
 					Description: "Mostrar ayuda",
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "new",
-					Description: "Verificar nuevas partidas inmediatamente",
 				},
 			},
 		},
@@ -214,7 +188,12 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	})
 	if err != nil {
-		getLogger().Errorf("Error respondiendo a interacción: %v", err)
+		// 10062 = Unknown interaction (token expirado o interacción ya respondida, p. ej. evento duplicado)
+		if strings.Contains(err.Error(), "10062") || strings.Contains(err.Error(), "Unknown interaction") {
+			getLogger().Debugf("Interacción ya respondida o expirada, ignorando: %v", err)
+		} else {
+			getLogger().Errorf("Error respondiendo a interacción: %v", err)
+		}
 		return
 	}
 
@@ -241,18 +220,12 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 		b.handleSearchSlash(s, i, subcommand)
 	case "register":
 		b.handleRegisterSlash(s, i, subcommand)
-	case "stats":
-		b.handleStatsSlash(s, i, subcommand)
-	case "update":
-		b.handleUpdateSlash(s, i, subcommand)
-	case "rank":
-		b.handleRankSlash(s, i)
 	case "channel":
 		b.handleChannelSlash(s, i, subcommand)
+	case "stats":
+		b.handleStatsSlash(s, i)
 	case "help":
 		b.handleHelpSlash(s, i)
-	case "new":
-		b.handleNewSlash(s, i)
 	default:
 		b.sendFollowup(s, i, "❌ Comando no reconocido. Usa `/dota help` para ver los comandos disponibles.")
 	}
@@ -294,8 +267,17 @@ func (b *Bot) handleSearchSlash(s *discordgo.Session, i *discordgo.InteractionCr
 
 	getLogger().Debugf("Buscando jugadores: %s", query)
 
-	results, err := b.dotaClient.SearchPlayers(query)
+	if b.stratzClient == nil || !b.stratzClient.IsConfigured() {
+		b.sendFollowup(s, i, "❌ Stratz no está configurado.")
+		return
+	}
+
+	results, err := b.stratzClient.SearchPlayers(query)
 	if err != nil {
+		if errors.Is(err, dota.ErrSearchNotSupported) {
+			b.sendFollowup(s, i, "🔍 La búsqueda por nombre no está disponible con Stratz.\n\nUsa **Steam ID** (account_id) directamente:\n`/dota register account_id:<tu_steam_id>`\n\nPuedes encontrar tu Steam ID en https://stratz.com (busca tu perfil o partidas).")
+			return
+		}
 		getLogger().Errorf("Error buscando jugadores: %v", err)
 		b.sendFollowup(s, i, fmt.Sprintf("❌ Error en la búsqueda: %v", err))
 		return
@@ -343,7 +325,7 @@ func (b *Bot) handleRegisterSlash(s *discordgo.Session, i *discordgo.Interaction
 	// Obtener el parámetro "account_id"
 	var accountIDInput string
 	var targetUser *discordgo.User
-	
+
 	for _, option := range subcommand.Options {
 		if option.Name == "account_id" {
 			accountIDInput = option.StringValue()
@@ -384,18 +366,31 @@ func (b *Bot) handleRegisterSlash(s *discordgo.Session, i *discordgo.Interaction
 		}
 	}
 
-	// Verificar que el jugador existe
-	profile, err := b.dotaClient.GetPlayerProfile(accountID)
+	// Verificar que el jugador existe (solo Stratz)
+	if b.stratzClient == nil || !b.stratzClient.IsConfigured() {
+		b.sendFollowup(s, i, "❌ Stratz no está configurado.")
+		return
+	}
+	accountIDInt, errParse := strconv.ParseInt(accountID, 10, 64)
+	if errParse != nil {
+		b.sendFollowup(s, i, "❌ account_id inválido")
+		return
+	}
+	profileStratz, err := b.stratzClient.GetPlayerProfile(accountIDInt)
 	if err != nil {
-		getLogger().Errorf("Error obteniendo perfil: %v", err)
-		b.sendFollowup(s, i, fmt.Sprintf("❌ Error verificando jugador: %v", err))
+		getLogger().Errorf("Error obteniendo perfil Stratz: %v", err)
+		b.sendFollowup(s, i, fmt.Sprintf("❌ Error verificando jugador (Stratz): %v", err))
+		return
+	}
+	if profileStratz == nil {
+		b.sendFollowup(s, i, "❌ No se encontró el jugador en Stratz")
 		return
 	}
 
 	// Determinar qué usuario registrar
 	var userID string
 	var discordUsername string
-	
+
 	if targetUser != nil {
 		// Registrar al usuario especificado
 		userID = targetUser.ID
@@ -423,318 +418,13 @@ func (b *Bot) handleRegisterSlash(s *discordgo.Session, i *discordgo.Interaction
 		return
 	}
 
-	personaname := profile.Profile.Personaname
+	personaname := profileStratz.Name
 	if personaname == "" {
 		personaname = "Jugador"
 	}
 
 	b.sendFollowup(s, i, fmt.Sprintf("✅ **%s** (Discord) asociado con **%s** (Dota 2)\nID de Dota: %s", discordUsername, personaname, accountID))
 	getLogger().Infof("Usuario Discord %s (%s) registrado con account_id %s", userID, discordUsername, accountID)
-}
-
-func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCreate, subcommand *discordgo.ApplicationCommandInteractionDataOption) {
-	var targetUserID string
-
-	// Verificar si hay usuario mencionado
-	if subcommand.Options != nil {
-		for _, option := range subcommand.Options {
-			if option.Name == "usuario" {
-				targetUserID = option.UserValue(s).ID
-				break
-			}
-		}
-	}
-
-	// Si no hay usuario, usar el que ejecutó el comando
-	if targetUserID == "" {
-		if i.Member != nil {
-			targetUserID = i.Member.User.ID
-		} else if i.User != nil {
-			targetUserID = i.User.ID
-		} else {
-			b.sendFollowup(s, i, "❌ No se pudo identificar al usuario")
-			return
-		}
-	}
-
-	accountID, ok := b.userStore.Get(targetUserID)
-	if !ok {
-		b.sendFollowup(s, i, "❌ Usuario no registrado. Usa `/dota register account_id:<account_id>` o `/dota search nombre:<nombre>`")
-		return
-	}
-
-	// Obtener partidas recientes
-	matches, err := b.dotaClient.GetRecentMatches(accountID)
-	if err != nil {
-		getLogger().Errorf("Error obteniendo partidas: %v", err)
-		b.sendFollowup(s, i, fmt.Sprintf("❌ Error obteniendo partidas: %v", err))
-		return
-	}
-
-	if len(matches) == 0 {
-		b.sendFollowup(s, i, "❌ No se encontraron partidas recientes")
-		return
-	}
-
-	// Analizar últimas 20 partidas
-	limit := 20
-	if len(matches) < limit {
-		limit = len(matches)
-	}
-	recentMatches := matches[:limit]
-
-	streak := b.dotaClient.AnalyzeStreak(recentMatches)
-
-	// Obtener perfil para nombre
-	profile, _ := b.dotaClient.GetPlayerProfile(accountID)
-	personaname := "Jugador"
-	if profile != nil && profile.Profile.Personaname != "" {
-		personaname = profile.Profile.Personaname
-	}
-
-	// Obtener nombre del usuario de Discord
-	discordUsername := "Usuario"
-	if i.Member != nil && i.Member.User != nil {
-		discordUsername = i.Member.User.Username
-	} else if i.User != nil {
-		discordUsername = i.User.Username
-	}
-
-	// Obtener detalles de la partida más reciente para enriquecer el embed
-	latestMatch := recentMatches[0]
-
-	// Obtener W/L de las últimas 20 partidas (endpoint específico)
-	wl, err := b.dotaClient.GetWinLoss(accountID, limit, 0)
-	if err != nil {
-		getLogger().Warnf("No se pudo obtener W/L: %v", err)
-	}
-	winLossText := "N/A"
-	winRateText := "N/A"
-	if wl != nil {
-		total := wl.Win + wl.Lose
-		if total > 0 {
-			winLossText = fmt.Sprintf("%d / %d", wl.Win, wl.Lose)
-			winRateText = fmt.Sprintf("%.1f%%", float64(wl.Win)/float64(total)*100)
-		}
-	}
-
-	// Obtener W/L del héroe específico (últimas 20 partidas con ese héroe)
-	heroName := b.dotaClient.GetHeroName(latestMatch.HeroID)
-	heroWL, err := b.dotaClient.GetWinLoss(accountID, 20, latestMatch.HeroID)
-	heroRecordText := "N/A"
-	if err != nil {
-		getLogger().Warnf("No se pudo obtener W/L del héroe %s (ID: %d) para account_id %s: %v", heroName, latestMatch.HeroID, accountID, err)
-	} else if heroWL != nil {
-		total := heroWL.Win + heroWL.Lose
-		if total > 0 {
-			winRate := float64(heroWL.Win) / float64(total) * 100
-			heroRecordText = fmt.Sprintf("%d-%d (%.1f%%)", heroWL.Win, heroWL.Lose, winRate)
-			getLogger().Debugf("Record del héroe %s para account_id %s: %s", heroName, accountID, heroRecordText)
-		} else {
-			getLogger().Debugf("Héroe %s (ID: %d) para account_id %s: sin partidas registradas", heroName, latestMatch.HeroID, accountID)
-		}
-	} else {
-		getLogger().Warnf("W/L del héroe %s (ID: %d) para account_id %s retornó nil", heroName, latestMatch.HeroID, accountID)
-	}
-	matchDetails, err := b.dotaClient.GetMatchDetails(latestMatch.MatchID)
-	var playerInMatch *dota.Player
-	if err == nil && matchDetails != nil {
-		playerInMatch, _ = b.dotaClient.FindPlayerInMatch(matchDetails, accountID)
-	}
-
-	heroImg := b.dotaClient.GetHeroImageURL(latestMatch.HeroID)
-	gameMode := "Mode desconocido"
-	lobbyType := "Lobby desconocido"
-	durationText := "N/A"
-	scoreText := "N/A"
-	if matchDetails != nil {
-		gameMode = b.dotaClient.GetGameModeName(matchDetails.GameMode)
-		lobbyType = b.dotaClient.GetLobbyTypeName(matchDetails.LobbyType)
-		durationText = dota.FormatDuration(matchDetails.Duration)
-		scoreText = fmt.Sprintf("Radiant %d - %d Dire", matchDetails.RadiantScore, matchDetails.DireScore)
-	}
-
-	matchURL := fmt.Sprintf("https://www.dotabuff.com/matches/%d", latestMatch.MatchID)
-
-	deaths := latestMatch.Deaths
-	if deaths == 0 {
-		deaths = 1
-	}
-	kdaText := fmt.Sprintf("%d/%d/%d (%.2f KDA)", latestMatch.Kills, latestMatch.Deaths, latestMatch.Assists, float64(latestMatch.Kills+latestMatch.Assists)/float64(deaths))
-
-	rankText := "Unranked"
-	levelText := "N/A"
-	gpmxpm := "N/A"
-	damages := "N/A"
-	if playerInMatch != nil {
-		rankText = dota.GetRankName(playerInMatch.RankTier)
-		levelText = strconv.Itoa(playerInMatch.Level)
-		gpmxpm = fmt.Sprintf("%d / %d", playerInMatch.GoldPerMin, playerInMatch.XpPerMin)
-		damages = fmt.Sprintf("%d / %d", playerInMatch.HeroDamage, playerInMatch.TowerDamage)
-	}
-
-	// Construir embed
-	embed := &discordgo.MessageEmbed{
-		Title:       fmt.Sprintf("📊 [%s](%s)", heroName, matchURL),
-		Description: fmt.Sprintf("Últimas %d partidas\nDiscord: %s\nJugador: %s", limit, discordUsername, personaname),
-		Color:       0x3498db,
-		Image: &discordgo.MessageEmbedImage{
-			URL: heroImg,
-		},
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   "Héroe",
-				Value:  heroName,
-				Inline: true,
-			},
-			{
-				Name:   "Modo",
-				Value:  fmt.Sprintf("%s (Lobby %s)", gameMode, lobbyType),
-				Inline: true,
-			},
-			{
-				Name:   "K/D/A",
-				Value:  kdaText,
-				Inline: true,
-			},
-			{
-				Name:   "Duración",
-				Value:  durationText,
-				Inline: true,
-			},
-			{
-				Name:   "Nivel",
-				Value:  levelText,
-				Inline: true,
-			},
-			{
-				Name:   "Score",
-				Value:  scoreText,
-				Inline: true,
-			},
-			{
-				Name:   "GPM / XPM",
-				Value:  gpmxpm,
-				Inline: true,
-			},
-			{
-				Name:   "Hero Damage / Tower Damage",
-				Value:  damages,
-				Inline: true,
-			},
-			{
-				Name:   "Rank",
-				Value:  rankText,
-				Inline: true,
-			},
-			{
-				Name:   "W/L (últimas 20)",
-				Value:  fmt.Sprintf("%s (Winrate %s)", winLossText, winRateText),
-				Inline: false,
-			},
-			{
-				Name:   fmt.Sprintf("Record con %s (últ. 20)", heroName),
-				Value:  heroRecordText,
-				Inline: false,
-			},
-			{
-				Name:   "🎯 Racha actual",
-				Value:  streak.CurrentStreak,
-				Inline: false,
-			},
-		},
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: fmt.Sprintf("Match ID: %d", latestMatch.MatchID),
-		},
-	}
-
-	b.sendFollowupEmbed(s, i, embed)
-}
-
-// handleUpdateSlash ejecuta POST /players/{account_id}/refresh y devuelve un resumen rápido
-func (b *Bot) handleUpdateSlash(s *discordgo.Session, i *discordgo.InteractionCreate, subcommand *discordgo.ApplicationCommandInteractionDataOption) {
-	accountID := ""
-	if subcommand.Options != nil {
-		for _, option := range subcommand.Options {
-			if option.Name == "account_id" {
-				accountID = option.StringValue()
-				break
-			}
-		}
-	}
-
-	if accountID == "" {
-		b.sendFollowup(s, i, "❌ Uso: `/dota update account_id:<steam32>`")
-		return
-	}
-
-	getLogger().Debugf("Solicitando refresh para account_id %s", accountID)
-
-	if err := b.dotaClient.RefreshPlayer(accountID); err != nil {
-		getLogger().Errorf("Error refrescando jugador %s: %v", accountID, err)
-		b.sendFollowup(s, i, fmt.Sprintf("❌ Error refrescando jugador: %v", err))
-		return
-	}
-
-	// Obtener perfil y W/L para mostrar un resumen inmediato
-	profile, _ := b.dotaClient.GetPlayerProfile(accountID)
-	wl, _ := b.dotaClient.GetWinLoss(accountID, 20, 0)
-
-	personaname := "Jugador"
-	rankText := "N/A"
-	mmrText := "N/A"
-	avatar := ""
-
-	if profile != nil {
-		if profile.Profile.Personaname != "" {
-			personaname = profile.Profile.Personaname
-		}
-		if profile.RankTier != nil {
-			rankText = dota.GetRankName(profile.RankTier)
-		}
-		if profile.ComputedMMR != nil && *profile.ComputedMMR > 0 {
-			mmrText = fmt.Sprintf("%.0f", *profile.ComputedMMR)
-		}
-		avatar = profile.Profile.Avatarfull
-		if avatar == "" {
-			avatar = profile.Profile.Avatar
-		}
-	}
-
-	wlText := "N/A"
-	if wl != nil {
-		total := wl.Win + wl.Lose
-		if total > 0 {
-			winRate := float64(wl.Win) / float64(total) * 100
-			wlText = fmt.Sprintf("%d/%d (%.1f%%)", wl.Win, wl.Lose, winRate)
-		} else {
-			wlText = "0/0"
-		}
-	}
-
-	dotabuffURL := fmt.Sprintf("https://www.dotabuff.com/players/%s", accountID)
-
-	embed := &discordgo.MessageEmbed{
-		Title:     fmt.Sprintf("🔄 Refresh solicitado para %s", personaname),
-		URL:       dotabuffURL,
-		Color:     0x2ecc71,
-		Timestamp: time.Now().Format(time.RFC3339),
-		Fields: []*discordgo.MessageEmbedField{
-			{Name: "Account ID", Value: accountID, Inline: true},
-			{Name: "Nombre", Value: personaname, Inline: true},
-			{Name: "Rango", Value: rankText, Inline: true},
-			{Name: "MMR", Value: mmrText, Inline: true},
-			{Name: "W/L (últ. 20)", Value: wlText, Inline: true},
-			{Name: "Estado", Value: "✅ Refresh ejecutado en OpenDota", Inline: true},
-		},
-	}
-
-	if avatar != "" {
-		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: avatar}
-	}
-
-	b.sendFollowupEmbed(s, i, embed)
-	getLogger().Infof("Refresh ejecutado para account_id %s (%s)", accountID, personaname)
 }
 
 func (b *Bot) handleChannelSlash(s *discordgo.Session, i *discordgo.InteractionCreate, subcommand *discordgo.ApplicationCommandInteractionDataOption) {
@@ -764,195 +454,126 @@ func (b *Bot) handleChannelSlash(s *discordgo.Session, i *discordgo.InteractionC
 	getLogger().Infof("Canal de notificaciones configurado: %s", channelID)
 }
 
-func (b *Bot) handleRankSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Obtener todos los usuarios registrados
-	allUsers := b.userStore.GetAll()
-	
-	if len(allUsers) == 0 {
-		b.sendFollowup(s, i, "❌ No hay usuarios registrados. Usa `/dota register` para registrar jugadores.")
+// getPlayerNameAndAvatar obtiene nombre y avatar del jugador (Stratz + fallback OpenDota), igual que la notificación de partida.
+func (b *Bot) getPlayerNameAndAvatar(accountID string, accountIDInt int64) (playerName, avatarURL string) {
+	profileStratz, _ := b.stratzClient.GetPlayerProfile(accountIDInt)
+	if profileStratz != nil {
+		playerName = profileStratz.Name
+		avatarURL = profileStratz.Avatar
+	}
+	if b.dotaClient != nil {
+		profileOD, errOD := b.dotaClient.GetPlayerProfile(accountID)
+		if errOD == nil && profileOD != nil {
+			if profileOD.Profile.Personaname != "" && playerName == "" {
+				playerName = profileOD.Profile.Personaname
+			}
+			if profileOD.Profile.Avatarfull != "" && avatarURL == "" {
+				avatarURL = profileOD.Profile.Avatarfull
+			}
+		}
+	}
+	return playerName, avatarURL
+}
+
+// buildStatsEmbed construye el embed de estadísticas por héroe (W/L, %). playerName en título; avatarURL opcional (Author + Thumbnail como en notificación).
+func (b *Bot) buildStatsEmbed(heroStats []dota.StratzHeroStats, minGames, take int, playerName, avatarURL string) *discordgo.MessageEmbed {
+	var red, yellow, green []string
+	for _, h := range heroStats {
+		winPct := 0.0
+		if h.MatchCount > 0 {
+			winPct = 100 * float64(h.WinCount) / float64(h.MatchCount)
+		}
+		name := b.dotaClient.GetHeroName(h.HeroID)
+		line := fmt.Sprintf("%s | %d-%d | %.1f%%", name, h.WinCount, h.MatchCount-h.WinCount, winPct)
+		switch {
+		case winPct < 40:
+			red = append(red, line)
+		case winPct <= 50:
+			yellow = append(yellow, line)
+		default:
+			green = append(green, line)
+		}
+	}
+	const maxDesc = 4000
+	var parts []string
+	if len(red) > 0 {
+		parts = append(parts, "🔴 **<40%**\n"+strings.Join(red, "\n"))
+	}
+	if len(yellow) > 0 {
+		parts = append(parts, "🟡 **40-50%**\n"+strings.Join(yellow, "\n"))
+	}
+	if len(green) > 0 {
+		parts = append(parts, "🟢 **>50%**\n"+strings.Join(green, "\n"))
+	}
+	description := strings.Join(parts, "\n\n")
+	if len(description) > maxDesc {
+		description = description[:maxDesc-3] + "..."
+	}
+	displayName := playerName
+	if displayName == "" {
+		displayName = "Jugador"
+	}
+	title := fmt.Sprintf("📊 Estadísticas por héroe — %s", displayName)
+	embed := &discordgo.MessageEmbed{
+		Title:       title,
+		Description: description,
+		Color:       0x3498db,
+		Footer:      &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("%d partidas analizadas • ≥%d partidas por héroe • Stratz", take, minGames)},
+	}
+	if avatarURL != "" {
+		embed.Author = &discordgo.MessageEmbedAuthor{
+			Name:    displayName,
+			IconURL: avatarURL,
+		}
+		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: avatarURL}
+	}
+	return embed
+}
+
+func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if b.stratzClient == nil || !b.stratzClient.IsConfigured() {
+		b.sendFollowup(s, i, "❌ Stratz no está configurado.")
 		return
 	}
-
-	// Estructura para almacenar información de ranking
-	type RankEntry struct {
-		DiscordID   string
-		DiscordName string
-		Personaname string
-		MMR         float64
-		RankTier    *int
-		AccountID   string
-		AvatarURL   string
+	users := b.userStore.GetAll()
+	if len(users) == 0 {
+		b.sendFollowup(s, i, "❌ No hay usuarios registrados. Usa `/dota register account_id:<tu_steam_id>` para registrar jugadores.")
+		return
 	}
-
-	var entries []RankEntry
-
-	// Obtener información de cada usuario
-	for discordID, accountID := range allUsers {
-		// Obtener perfil del jugador
-		profile, err := b.dotaClient.GetPlayerProfile(accountID)
-		if err != nil {
-			getLogger().Warnf("Error obteniendo perfil para account_id %s: %v", accountID, err)
+	minGames := b.config.StatsMinGames
+	take := b.config.StatsTake
+	getLogger().Debugf("stats: mostrando %d usuario(s) registrado(s)", len(users))
+	sent := 0
+	for _, accountID := range users {
+		accountIDInt, errParse := strconv.ParseInt(accountID, 10, 64)
+		if errParse != nil {
+			getLogger().Debugf("stats: account_id inválido omitido: %s", accountID)
 			continue
 		}
-
-		// Obtener nombre de Discord
-		discordName := "Usuario desconocido"
-		user, err := s.User(discordID)
-		if err == nil && user != nil {
-			discordName = user.Username
+		playerName, avatarURL := b.getPlayerNameAndAvatar(accountID, accountIDInt)
+		heroStats, err := b.stratzClient.GetPlayerHeroStats(accountIDInt, minGames, take)
+		if err != nil {
+			getLogger().Errorf("stats: GetPlayerHeroStats para %s: %v", accountID, err)
+			continue
 		}
-
-		// Extraer información
-		personaname := profile.Profile.Personaname
-		if personaname == "" {
-			personaname = "Jugador"
+		if len(heroStats) == 0 {
+			getLogger().Debugf("stats: sin héroes con ≥%d partidas para %s", minGames, accountID)
+			continue
 		}
-
-		mmr := 0.0
-		if profile.ComputedMMR != nil {
-			mmr = *profile.ComputedMMR
-		}
-
-		// Obtener avatar (preferir Steam, fallback a Discord)
-		avatarURL := profile.Profile.Avatarfull
-		if avatarURL == "" {
-			avatarURL = profile.Profile.Avatar
-		}
-		// Si no hay avatar de Steam, usar avatar de Discord
-		if avatarURL == "" {
-			if user != nil && user.Avatar != "" {
-				avatarURL = user.AvatarURL("")
-			}
-		}
-
-		entries = append(entries, RankEntry{
-			DiscordID:   discordID,
-			DiscordName: discordName,
-			Personaname: personaname,
-			MMR:         mmr,
-			RankTier:    profile.RankTier,
-			AccountID:   accountID,
-			AvatarURL:   avatarURL,
-		})
+		embed := b.buildStatsEmbed(heroStats, minGames, take, playerName, avatarURL)
+		b.sendFollowupEmbed(s, i, embed)
+		sent++
+		time.Sleep(500 * time.Millisecond) // evitar rate limit entre followups
 	}
-
-	if len(entries) == 0 {
-		b.sendFollowup(s, i, "❌ No se pudo obtener información de los usuarios registrados.")
-		return
-	}
-
-	// Ordenar: primero por RankTier (mayor es mejor), luego por MMR (mayor es mejor)
-	// Usamos sort.Slice para ordenar de menor a mayor (último al primero)
-	for i := 0; i < len(entries)-1; i++ {
-		for j := i + 1; j < len(entries); j++ {
-			// Comparar RankTier primero
-			rankI := 0
-			rankJ := 0
-			if entries[i].RankTier != nil {
-				rankI = *entries[i].RankTier
-			}
-			if entries[j].RankTier != nil {
-				rankJ = *entries[j].RankTier
-			}
-
-			// Si tienen el mismo rango, comparar por MMR
-			if rankI == rankJ {
-				if entries[i].MMR < entries[j].MMR {
-					entries[i], entries[j] = entries[j], entries[i]
-				}
-			} else if rankI < rankJ {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
-		}
-	}
-
-	// Construir múltiples embeds con imágenes de jugadores
-	// Discord permite hasta 10 embeds por mensaje
-	var embeds []*discordgo.MessageEmbed
-
-	// Embed principal con título
-	mainEmbed := &discordgo.MessageEmbed{
-		Title:       "🏆 Ranking de Jugadores",
-		Description: fmt.Sprintf("Total de jugadores: %d\nOrdenado por rango y MMR (menor a mayor)\n\n", len(entries)),
-		Color:       0xFFD700, // Color dorado
-	}
-	embeds = append(embeds, mainEmbed)
-
-	// Discord limita a 10 embeds por mensaje, así que limitamos a 9 jugadores (1 para el título)
-	maxEntries := len(entries)
-	if maxEntries > 9 {
-		maxEntries = 9
-	}
-
-	for idx := 0; idx < maxEntries; idx++ {
-		entry := entries[idx]
-		position := idx + 1
-		
-		// Obtener nombre del rango
-		rankName := "Unranked"
-		if entry.RankTier != nil {
-			rankName = dota.GetRankName(entry.RankTier)
-		}
-
-		// Formatear MMR
-		mmrText := "N/A"
-		if entry.MMR > 0 {
-			mmrText = fmt.Sprintf("%.0f", entry.MMR)
-		}
-
-		// Emoji según posición
-		emoji := "🥉"
-		if position == 1 {
-			emoji = "🥇"
-		} else if position == 2 {
-			emoji = "🥈"
-		} else if position == 3 {
-			emoji = "🥉"
-		}
-
-		// Construir descripción del jugador
-		var desc strings.Builder
-		desc.WriteString(fmt.Sprintf("%s **#%d**\n", emoji, position))
-		desc.WriteString(fmt.Sprintf("**%s** (@%s)\n", entry.Personaname, entry.DiscordName))
-		desc.WriteString(fmt.Sprintf("MMR: **%s**\n", mmrText))
-		desc.WriteString(fmt.Sprintf("Rango: **%s**", rankName))
-
-		// Crear embed para este jugador
-		playerEmbed := &discordgo.MessageEmbed{
-			Title:       fmt.Sprintf("#%d - %s", position, entry.Personaname),
-			Description: desc.String(),
-			Color:       0x3498db,
-			Thumbnail: &discordgo.MessageEmbedThumbnail{
-				URL: entry.AvatarURL,
-			},
-		}
-
-		embeds = append(embeds, playerEmbed)
-	}
-
-	if len(entries) > 9 {
-		// Agregar embed final con información de jugadores restantes
-		remainingEmbed := &discordgo.MessageEmbed{
-			Description: fmt.Sprintf("... y %d jugador(es) más", len(entries)-9),
-			Color:       0x95a5a6,
-		}
-		embeds = append(embeds, remainingEmbed)
-	}
-
-	// Enviar múltiples embeds
-	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Embeds: embeds,
-	})
-	if err != nil {
-		getLogger().Errorf("Error enviando embeds de ranking: %v", err)
-		b.sendFollowup(s, i, "❌ Error mostrando ranking")
+	if sent == 0 {
+		b.sendFollowup(s, i, fmt.Sprintf("Ningún jugador registrado tiene héroes con al menos %d partidas en las últimas %d partidas analizadas.", minGames, take))
 	}
 }
 
 func (b *Bot) handleHelpSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	embed := &discordgo.MessageEmbed{
 		Title:       "🎮 Comandos del Bot de Dota 2",
-		Description: "Comandos disponibles. Usa register para asociar un Discord ID con un ID de Dota y que stats funcione sin parámetros.",
+		Description: "Comandos disponibles. Usa register para asociar un Discord ID con un ID de Dota.",
 		Color:       0x3498db,
 		Fields: []*discordgo.MessageEmbedField{
 			{
@@ -966,23 +587,13 @@ func (b *Bot) handleHelpSlash(s *discordgo.Session, i *discordgo.InteractionCrea
 				Inline: false,
 			},
 			{
-				Name:   "/dota stats [usuario:<@usuario>]",
-				Value:  "Estadísticas de las últimas 20 partidas del usuario registrado (victorias/derrotas/racha).\n**Ejemplos:** `/dota stats` · `/dota stats usuario:@amigo`",
-				Inline: false,
-			},
-			{
-				Name:   "/dota rank",
-				Value:  "Muestra el ranking de todos los jugadores registrados, ordenados por MMR y rango (del menor al mayor).",
-				Inline: false,
-			},
-			{
 				Name:   "/dota channel canal:<#canal>",
 				Value:  "Configura el canal para notificaciones automáticas de nuevas partidas.\n**Ejemplo:** `/dota channel canal:#dota-updates`",
 				Inline: false,
 			},
 			{
-				Name:   "/dota new",
-				Value:  "Verificar nuevas partidas inmediatamente (sin esperar el chequeo automático)",
+				Name:   "/dota stats",
+				Value:  "Un mensaje por cada usuario registrado: estadísticas por héroe (W/L, %) con ≥STATS_MIN_GAMES partidas en las últimas STATS_TAKE partidas. Colores: 🔴 ≤40%, 🟡 40-50%, 🟢 ≥50%.",
 				Inline: false,
 			},
 			{
@@ -994,22 +605,6 @@ func (b *Bot) handleHelpSlash(s *discordgo.Session, i *discordgo.InteractionCrea
 	}
 
 	b.sendFollowupEmbed(s, i, embed)
-}
-
-func (b *Bot) handleNewSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	getLogger().Debugf("Comando /dota new ejecutado, verificando nuevas partidas...")
-	
-	// Enviar mensaje de confirmación inmediato
-	b.sendFollowup(s, i, "🔍 Verificando nuevas partidas...")
-	
-	// Ejecutar chequeo de nuevas partidas
-	if err := b.CheckForNewMatches(); err != nil {
-		getLogger().Errorf("Error verificando partidas: %v", err)
-		b.sendFollowup(s, i, fmt.Sprintf("❌ Error verificando partidas: %v", err))
-		return
-	}
-	
-	getLogger().Info("Verificación de nuevas partidas completada")
 }
 
 // Handlers antiguos (mantener por compatibilidad, pero no se usan con slash commands)
@@ -1042,22 +637,34 @@ func (b *Bot) handleRegister(s *discordgo.Session, m *discordgo.MessageCreate, a
 		}
 	}
 
-	// Verificar que el jugador existe
-	profile, err := b.dotaClient.GetPlayerProfile(accountID)
+	// Verificar que el jugador existe (solo Stratz)
+	if b.stratzClient == nil || !b.stratzClient.IsConfigured() {
+		s.ChannelMessageSend(m.ChannelID, "❌ Stratz no está configurado.")
+		return
+	}
+	accountIDInt, errParse := strconv.ParseInt(accountID, 10, 64)
+	if errParse != nil {
+		s.ChannelMessageSend(m.ChannelID, "❌ account_id inválido")
+		return
+	}
+	profileStratz, err := b.stratzClient.GetPlayerProfile(accountIDInt)
 	if err != nil {
-		getLogger().Errorf("Error obteniendo perfil: %v", err)
+		getLogger().Errorf("Error obteniendo perfil Stratz: %v", err)
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Error verificando jugador: %v", err))
 		return
 	}
+	if profileStratz == nil {
+		s.ChannelMessageSend(m.ChannelID, "❌ No se encontró el jugador en Stratz")
+		return
+	}
 
-	// Registrar usuario
 	if err := b.userStore.Set(m.Author.ID, accountID); err != nil {
 		getLogger().Errorf("Error guardando usuario: %v", err)
 		s.ChannelMessageSend(m.ChannelID, "❌ Error guardando registro")
 		return
 	}
 
-	personaname := profile.Profile.Personaname
+	personaname := profileStratz.Name
 	if personaname == "" {
 		personaname = "Jugador"
 	}
@@ -1075,8 +682,16 @@ func (b *Bot) handleSearch(s *discordgo.Session, m *discordgo.MessageCreate, arg
 	query := strings.Join(args, " ")
 	getLogger().Debugf("Buscando jugadores: %s", query)
 
-	results, err := b.dotaClient.SearchPlayers(query)
+	if b.stratzClient == nil || !b.stratzClient.IsConfigured() {
+		s.ChannelMessageSend(m.ChannelID, "❌ Stratz no está configurado.")
+		return
+	}
+	results, err := b.stratzClient.SearchPlayers(query)
 	if err != nil {
+		if errors.Is(err, dota.ErrSearchNotSupported) {
+			s.ChannelMessageSend(m.ChannelID, "🔍 La búsqueda por nombre no está disponible. Usa `/dota register account_id:<tu_steam_id>`. Encuentra tu ID en https://stratz.com")
+			return
+		}
 		getLogger().Errorf("Error buscando jugadores: %v", err)
 		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Error en la búsqueda: %v", err))
 		return
@@ -1114,81 +729,6 @@ func (b *Bot) handleSearch(s *discordgo.Session, m *discordgo.MessageCreate, arg
 	msg.WriteString("Usa `/dota register <número>` para registrar un jugador")
 
 	s.ChannelMessageSend(m.ChannelID, msg.String())
-}
-
-func (b *Bot) handleStats(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
-	var targetUserID string
-
-	// Verificar si hay mención
-	if len(m.Mentions) > 0 {
-		targetUserID = m.Mentions[0].ID
-	} else {
-		targetUserID = m.Author.ID
-	}
-
-	accountID, ok := b.userStore.Get(targetUserID)
-	if !ok {
-		s.ChannelMessageSend(m.ChannelID, "❌ Usuario no registrado. Usa `/dota register <account_id>` o `/dota search <nombre>`")
-		return
-	}
-
-	// Obtener partidas recientes
-	matches, err := b.dotaClient.GetRecentMatches(accountID)
-	if err != nil {
-		getLogger().Errorf("Error obteniendo partidas: %v", err)
-		s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Error obteniendo partidas: %v", err))
-		return
-	}
-
-	if len(matches) == 0 {
-		s.ChannelMessageSend(m.ChannelID, "❌ No se encontraron partidas recientes")
-		return
-	}
-
-	// Analizar últimas 20 partidas
-	limit := 20
-	if len(matches) < limit {
-		limit = len(matches)
-	}
-	recentMatches := matches[:limit]
-
-	streak := b.dotaClient.AnalyzeStreak(recentMatches)
-
-	// Obtener perfil para nombre
-	profile, _ := b.dotaClient.GetPlayerProfile(accountID)
-	personaname := "Jugador"
-	if profile != nil && profile.Profile.Personaname != "" {
-		personaname = profile.Profile.Personaname
-	}
-
-	// Construir embed
-	embed := &discordgo.MessageEmbed{
-		Title:       fmt.Sprintf("📊 Estadísticas de %s", personaname),
-		Description: fmt.Sprintf("Últimas %d partidas\nDiscord: %s", limit, m.Author.Username),
-		Color:       0x3498db,
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   "✅ Victorias",
-				Value:  strconv.Itoa(streak.Wins),
-				Inline: true,
-			},
-			{
-				Name:   "❌ Derrotas",
-				Value:  strconv.Itoa(streak.Losses),
-				Inline: true,
-			},
-			{
-				Name:   "🎯 Racha actual",
-				Value:  streak.CurrentStreak,
-				Inline: false,
-			},
-		},
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: fmt.Sprintf("Winrate: %.1f%%", float64(streak.Wins)/float64(limit)*100),
-		},
-	}
-
-	s.ChannelMessageSendEmbed(m.ChannelID, embed)
 }
 
 func (b *Bot) handleChannel(s *discordgo.Session, m *discordgo.MessageCreate, args []string) {
@@ -1254,13 +794,13 @@ func (b *Bot) handleHelp(s *discordgo.Session, m *discordgo.MessageCreate) {
 				Inline: false,
 			},
 			{
-				Name:   "/dota stats [@usuario]",
-				Value:  "Ver estadísticas de las últimas 20 partidas (tuyas o de otro usuario)",
+				Name:   "/dota channel <#canal>",
+				Value:  "Configurar canal para notificaciones automáticas",
 				Inline: false,
 			},
 			{
-				Name:   "/dota channel <#canal>",
-				Value:  "Configurar canal para notificaciones automáticas",
+				Name:   "/dota stats",
+				Value:  "Estadísticas por héroe en el parche actual (W/L, % victorias)",
 				Inline: false,
 			},
 			{
@@ -1330,13 +870,13 @@ func (b *Bot) SendWelcomeMessage() error {
 				Inline: false,
 			},
 			{
-				Name:   "4️⃣ /dota stats [usuario:@usuario]",
-				Value:  "Muestra estadísticas de las últimas 20 partidas del usuario registrado (victorias/derrotas/racha).\n**Ejemplos:** `/dota stats` · `/dota stats usuario:@amigo`",
+				Name:   "4️⃣ /dota channel canal:<#canal>",
+				Value:  "Configura el canal para notificaciones automáticas de nuevas partidas.\n**Ejemplo:** `/dota channel canal:#dota-updates`",
 				Inline: false,
 			},
 			{
-				Name:   "5️⃣ /dota channel canal:<#canal>",
-				Value:  "Configura el canal para notificaciones automáticas de nuevas partidas.\n**Ejemplo:** `/dota channel canal:#dota-updates`",
+				Name:   "5️⃣ /dota stats",
+				Value:  "Estadísticas por héroe en el parche actual: W/L y % victorias (héroes con ≥10 partidas).",
 				Inline: false,
 			},
 		},
@@ -1380,14 +920,24 @@ func (b *Bot) CheckForNewMatches() error {
 		return nil
 	}
 
+	if b.stratzClient == nil || !b.stratzClient.IsConfigured() {
+		getLogger().Debug("Stratz no configurado, omitiendo verificación de partidas")
+		return nil
+	}
+
 	for discordID, accountID := range users {
-		// Obtener última partida conocida
 		lastMatchID, hasLastMatch := b.userStore.GetLastMatch(discordID)
 
-		// Obtener partidas recientes
-		matches, err := b.dotaClient.GetRecentMatches(accountID)
+		accountIDInt, errParse := strconv.ParseInt(accountID, 10, 64)
+		if errParse != nil {
+			getLogger().Warnf("account_id inválido para %s: %s", discordID, accountID)
+			continue
+		}
+
+		// Partidas recientes desde Stratz
+		matches, err := b.stratzClient.GetPlayerRecentMatches(accountIDInt, 5)
 		if err != nil {
-			getLogger().Errorf("Error obteniendo partidas para %s: %v", accountID, err)
+			getLogger().Errorf("Error obteniendo partidas Stratz para %s: %v", accountID, err)
 			continue
 		}
 
@@ -1395,59 +945,309 @@ func (b *Bot) CheckForNewMatches() error {
 			continue
 		}
 
-		// La primera partida es la más reciente
-		latestMatch := matches[0]
-
-		// Verificar si es una nueva partida
-		if hasLastMatch && latestMatch.MatchID == lastMatchID {
-			continue // No hay nueva partida
-		}
-
-		// Nueva partida detectada
-		getLogger().Infof("Nueva partida detectada para %s: %d", accountID, latestMatch.MatchID)
-
-		// Obtener detalles completos de la partida
-		matchDetails, err := b.dotaClient.GetMatchDetails(latestMatch.MatchID)
-		if err != nil {
-			getLogger().Errorf("Error obteniendo detalles de partida %d: %v", latestMatch.MatchID, err)
+		latestStratzMatch := matches[0]
+		if hasLastMatch && latestStratzMatch.ID == lastMatchID {
 			continue
 		}
 
-		// Encontrar al jugador en la partida
-		player, err := b.dotaClient.FindPlayerInMatch(matchDetails, accountID)
+		getLogger().Infof("Nueva partida detectada para %s: %d", accountID, latestStratzMatch.ID)
+
+		// Detalles de la partida desde Stratz
+		matchDetailsStratz, err := b.stratzClient.GetMatch(latestStratzMatch.ID)
 		if err != nil {
-			getLogger().Errorf("Error encontrando jugador en partida: %v", err)
+			getLogger().Errorf("Error obteniendo detalles partida %d: %v", latestStratzMatch.ID, err)
 			continue
 		}
 
-		// Obtener perfil del jugador
-		profile, err := b.dotaClient.GetPlayerProfile(accountID)
-		if err != nil {
-			getLogger().Errorf("Error obteniendo perfil: %v", err)
-			// Continuar sin perfil
+		// Si PARSED=true: solo notificar cuando la partida esté parseada (parsedDateTime > 0)
+		if b.config.RequireParsed && matchDetailsStratz != nil && !dota.IsMatchParsed(matchDetailsStratz) {
+			parsedVal := "null"
+			if matchDetailsStratz.ParsedDateTime != nil {
+				parsedVal = strconv.FormatInt(*matchDetailsStratz.ParsedDateTime, 10)
+			}
+			getLogger().Debugf("Partida %d no parseada (parsedDateTime=%s), solicitando parse y omitiendo notificación este ciclo", latestStratzMatch.ID, parsedVal)
+			if errParse := b.stratzClient.RequestParseMatch(latestStratzMatch.ID); errParse != nil {
+				getLogger().Debugf("RequestParseMatch para %d: %v (la API puede no exponer la mutación)", latestStratzMatch.ID, errParse)
+			}
+			// No actualizar lastMatchID: en el siguiente ciclo se reintentará
+			continue
 		}
 
-		// Publicar notificación
+		// Buscar al jugador en la partida
+		var playerStratz *dota.StratzPlayer
+		for i := range matchDetailsStratz.Players {
+			if matchDetailsStratz.Players[i].SteamAccountID == accountIDInt {
+				playerStratz = &matchDetailsStratz.Players[i]
+				break
+			}
+		}
+		if playerStratz == nil {
+			getLogger().Errorf("Jugador %s no encontrado en partida %d", accountID, latestStratzMatch.ID)
+			continue
+		}
+
+		profileStratz, _ := b.stratzClient.GetPlayerProfile(accountIDInt)
+
+		// Convertir a tipos dota para sendMatchNotification
+		matchDetails := dota.StratzMatchToMatchResponse(matchDetailsStratz)
+		var player *dota.Player
+		for j := range matchDetails.Players {
+			if matchDetails.Players[j].AccountID == int(accountIDInt) {
+				player = &matchDetails.Players[j]
+				break
+			}
+		}
+		if player == nil {
+			continue
+		}
+
+		var profile *dota.PlayersResponse
+		if profileStratz != nil {
+			profile = &dota.PlayersResponse{}
+			profile.Profile.Personaname = profileStratz.Name
+			profile.Profile.Avatarfull = profileStratz.Avatar
+			profile.Profile.AccountID = int(profileStratz.SteamAccountID)
+			profile.RankBracket = profileStratz.RankBracket
+		}
+		// Nombre y avatar: fallback a OpenDota si Stratz no devuelve
+		if b.dotaClient != nil {
+			profileOD, errOD := b.dotaClient.GetPlayerProfile(accountID)
+			if errOD == nil && profileOD != nil {
+				if profile == nil {
+					profile = &dota.PlayersResponse{}
+					profile.Profile.AccountID = int(accountIDInt)
+					if profileStratz != nil {
+						profile.Profile.Personaname = profileStratz.Name
+						profile.RankBracket = profileStratz.RankBracket
+					}
+				}
+				if profileOD.Profile.Personaname != "" && profile.Profile.Personaname == "" {
+					profile.Profile.Personaname = profileOD.Profile.Personaname
+				}
+				if profileOD.Profile.Avatarfull != "" && profile.Profile.Avatarfull == "" {
+					profile.Profile.Avatarfull = profileOD.Profile.Avatarfull
+				}
+			}
+		}
+
 		if err := b.sendMatchNotification(channelID, matchDetails, player, profile, accountID); err != nil {
 			getLogger().Errorf("Error enviando notificación: %v", err)
 			continue
 		}
 
-		// Actualizar última partida conocida
-		if err := b.userStore.SetLastMatch(discordID, latestMatch.MatchID); err != nil {
+		if err := b.userStore.SetLastMatch(discordID, latestStratzMatch.ID); err != nil {
 			getLogger().Errorf("Error guardando última partida: %v", err)
 		}
 
-		// Rate limiting: esperar entre notificaciones
 		time.Sleep(2 * time.Second)
 	}
 
 	return nil
 }
 
+// RunStatsScheduler ejecuta en bucle y, a la hora STATS_TIME (HH:MM), envía stats de todos los registrados al canal de notificaciones.
+// Si STATS_TIME está vacío, retorna sin hacer nada.
+func (b *Bot) RunStatsScheduler() {
+	if b.config.StatsTime == "" {
+		getLogger().Debug("STATS_TIME vacío, scheduler de stats desactivado")
+		return
+	}
+	statsTime, err := time.Parse("15:04", b.config.StatsTime)
+	if err != nil {
+		getLogger().Warnf("STATS_TIME inválido (%q), usar HH:MM (ej. 20:00): %v", b.config.StatsTime, err)
+		return
+	}
+	targetHour, targetMin := statsTime.Hour(), statsTime.Minute()
+	if b.stratzClient == nil || !b.stratzClient.IsConfigured() {
+		getLogger().Warn("Stats diarios: Stratz no configurado, scheduler desactivado")
+		return
+	}
+	getLogger().Infof("Scheduler de stats diarios a las %s", b.config.StatsTime)
+
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		if now.Hour() != targetHour || now.Minute() != targetMin {
+			continue
+		}
+		today := now.Format("2006-01-02")
+		b.statsMu.Lock()
+		if b.lastStatsDay == today {
+			b.statsMu.Unlock()
+			continue
+		}
+		b.lastStatsDay = today
+		b.statsMu.Unlock()
+
+		channelID, errChan := b.userStore.GetChannel()
+		if errChan != nil || channelID == "" {
+			getLogger().Warn("Stats diarios: no hay canal configurado, omitiendo")
+			continue
+		}
+		users := b.userStore.GetAll()
+		if len(users) == 0 {
+			getLogger().Debug("Stats diarios: no hay usuarios registrados")
+			continue
+		}
+		minGames := b.config.StatsMinGames
+		take := b.config.StatsTake
+		getLogger().Infof("Enviando stats diarios para %d jugador(es) a las %s", len(users), b.config.StatsTime)
+		for discordID, accountID := range users {
+			accountIDInt, errParse := strconv.ParseInt(accountID, 10, 64)
+			if errParse != nil {
+				getLogger().Debugf("Stats diarios: account_id inválido para %s: %s", discordID, accountID)
+				continue
+			}
+			playerName, avatarURL := b.getPlayerNameAndAvatar(accountID, accountIDInt)
+			heroStats, err := b.stratzClient.GetPlayerHeroStats(accountIDInt, minGames, take)
+			if err != nil {
+				getLogger().Errorf("Stats diarios: GetPlayerHeroStats para %s: %v", accountID, err)
+				continue
+			}
+			if len(heroStats) == 0 {
+				getLogger().Debugf("Stats diarios: sin héroes con ≥%d partidas para %s", minGames, accountID)
+				continue
+			}
+			embed := b.buildStatsEmbed(heroStats, minGames, take, playerName, avatarURL)
+			_, errSend := b.session.ChannelMessageSendEmbed(channelID, embed)
+			if errSend != nil {
+				getLogger().Errorf("Stats diarios: error enviando embed para %s: %v", accountID, errSend)
+			}
+			time.Sleep(1 * time.Second) // evitar rate limit
+		}
+	}
+}
+
+// formatLaneOutcomeEnum devuelve texto en español para LaneOutcomeEnums de Stratz.
+func formatLaneOutcomeEnum(outcome string) string {
+	switch strings.ToUpper(outcome) {
+	case "RADIANT_VICTORY":
+		return "Victoria Radiant"
+	case "RADIANT_STOMP":
+		return "Stomp Radiant"
+	case "DIRE_VICTORY":
+		return "Victoria Dire"
+	case "DIRE_STOMP":
+		return "Stomp Dire"
+	case "TIE":
+		return "Empate"
+	default:
+		if outcome == "" {
+			return "—"
+		}
+		return outcome
+	}
+}
+
+// formatLaneOutcomeWithColor devuelve el texto del outcome con emoji de color según si el jugador ganó o perdió esa línea.
+// isRadiant = equipo del jugador. 🟢 = victoria de su equipo en esa línea, 🔴 = derrota, sin emoji = empate.
+func formatLaneOutcomeWithColor(outcome string, isRadiant bool) string {
+	text := formatLaneOutcomeEnum(outcome)
+	upper := strings.ToUpper(outcome)
+	if upper == "TIE" || upper == "" {
+		return text
+	}
+	radiantWon := upper == "RADIANT_VICTORY" || upper == "RADIANT_STOMP"
+	if radiantWon && isRadiant {
+		return "🟢 " + text
+	}
+	if radiantWon && !isRadiant {
+		return "🔴 " + text
+	}
+	// Dire won
+	if !isRadiant {
+		return "🟢 " + text
+	}
+	return "🔴 " + text
+}
+
+// playerLanePosition devuelve "top","mid","bottom" según Stratz lane + isRadiant; "" si jungle/roaming.
+func playerLanePosition(lane string, isRadiant bool) string {
+	switch strings.ToUpper(lane) {
+	case "SAFE_LANE":
+		if isRadiant {
+			return "bottom"
+		}
+		return "top"
+	case "OFF_LANE":
+		if isRadiant {
+			return "top"
+		}
+		return "bottom"
+	case "MID_LANE":
+		return "mid"
+	default:
+		return ""
+	}
+}
+
+// buildLaneOutcomeText construye (1) línea de victoria/derrota en fase de línea para el jugador (texto pequeño) y (2) resumen por línea.
+// En el resumen por línea: 🟢 = victoria del equipo del jugador en esa línea, 🔴 = derrota, sin emoji = empate.
+func (b *Bot) buildLaneOutcomeText(match *dota.MatchResponse, player *dota.Player) (lanePhaseLine, laneSummary string) {
+	isRadiant := player.IsRadiant != nil && *player.IsRadiant
+	topO := formatLaneOutcomeWithColor(match.TopLaneOutcome, isRadiant)
+	midO := formatLaneOutcomeWithColor(match.MidLaneOutcome, isRadiant)
+	botO := formatLaneOutcomeWithColor(match.BottomLaneOutcome, isRadiant)
+	pos := playerLanePosition(player.Lane, isRadiant)
+
+	// Resumen siempre: Top / Mid / Bottom (marcar (tú) en la línea del jugador)
+	topLabel := "Top"
+	midLabel := "Mid"
+	botLabel := "Bottom"
+	if pos == "top" {
+		topLabel = "Top (tú)"
+	} else if pos == "mid" {
+		midLabel = "Mid (tú)"
+	} else if pos == "bottom" {
+		botLabel = "Bottom (tú)"
+	}
+	laneSummary = fmt.Sprintf("%s: %s\n%s: %s\n%s: %s", topLabel, topO, midLabel, midO, botLabel, botO)
+
+	// Victoria/derrota en fase de línea solo si jugó una línea (no jungle/roaming)
+	if pos == "" {
+		return "", laneSummary
+	}
+	var outcome string
+	switch pos {
+	case "top":
+		outcome = match.TopLaneOutcome
+	case "mid":
+		outcome = match.MidLaneOutcome
+	case "bottom":
+		outcome = match.BottomLaneOutcome
+	default:
+		return "", laneSummary
+	}
+	outcome = strings.ToUpper(outcome)
+	var laneResult string
+	switch outcome {
+	case "TIE":
+		laneResult = "*Empate en fase de línea*"
+	case "RADIANT_VICTORY", "RADIANT_STOMP":
+		if isRadiant {
+			laneResult = "*✅ Victoria en fase de línea*"
+		} else {
+			laneResult = "*❌ Derrota en fase de línea*"
+		}
+	case "DIRE_VICTORY", "DIRE_STOMP":
+		if isRadiant {
+			laneResult = "*❌ Derrota en fase de línea*"
+		} else {
+			laneResult = "*✅ Victoria en fase de línea*"
+		}
+	default:
+		laneResult = ""
+	}
+	return laneResult, laneSummary
+}
+
 func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse, player *dota.Player, profile *dota.PlayersResponse, accountID string) error {
-	// Determinar resultado
-	isWin := b.dotaClient.IsWinFromPlayer(*player, match.RadiantWin)
+	// Determinar resultado (RadiantWin + IsRadiant)
+	isWin := false
+	if match.RadiantWin != nil && player.IsRadiant != nil {
+		isWin = *match.RadiantWin == *player.IsRadiant
+	}
 	resultText := "❌ Derrota"
 	resultColor := 0xe74c3c // Rojo
 	if isWin {
@@ -1467,46 +1267,69 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		personaname = player.Personaname
 	}
 
-	// Obtener nombre del héroe
+	// Obtener nombre del héroe y URLs (datos locales desde dota package)
 	heroName := b.dotaClient.GetHeroName(player.HeroID)
 	heroImg := b.dotaClient.GetHeroImageURL(player.HeroID)
-
-	// Obtener modo de juego
-	gameModeName := b.dotaClient.GetGameModeName(match.GameMode)
-	lobbyTypeName := b.dotaClient.GetLobbyTypeName(match.LobbyType)
-
-	// Obtener W/L del héroe específico (últimas 20 partidas con ese héroe)
-	heroWL, err := b.dotaClient.GetWinLoss(accountID, 20, player.HeroID)
-	heroRecordText := "N/A"
-	if err != nil {
-		getLogger().Warnf("No se pudo obtener W/L del héroe %s (ID: %d) para account_id %s en notificación: %v", heroName, player.HeroID, accountID, err)
-	} else if heroWL != nil {
-		total := heroWL.Win + heroWL.Lose
-		if total > 0 {
-			winRate := float64(heroWL.Win) / float64(total) * 100
-			heroRecordText = fmt.Sprintf("%d-%d (%.1f%%)", heroWL.Win, heroWL.Lose, winRate)
-			getLogger().Debugf("Record del héroe %s para account_id %s en notificación: %s", heroName, accountID, heroRecordText)
-		} else {
-			getLogger().Debugf("Héroe %s (ID: %d) para account_id %s en notificación: sin partidas registradas", heroName, player.HeroID, accountID)
-		}
-	} else {
-		getLogger().Warnf("W/L del héroe %s (ID: %d) para account_id %s en notificación retornó nil", heroName, player.HeroID, accountID)
+	if heroImg == "" {
+		heroImg = dota.GetHeroImageURLStratz(player.HeroID)
+	}
+	heroIconURL := b.dotaClient.GetHeroIconURL(player.HeroID)
+	if heroIconURL == "" {
+		heroIconURL = dota.GetHeroImageURLStratz(player.HeroID)
 	}
 
-	// Calcular racha (se usará más abajo)
-	var recentMatches []dota.PlayerRecentMatch
-	recentMatches, err = b.dotaClient.GetRecentMatches(accountID)
+	gameModeName := b.dotaClient.GetGameModeName(match.GameMode)
+	gameModeDisplayName := dota.GameModeDisplayName(gameModeName)
 
-	// Construir embed
+	if b.config.Debug {
+		getLogger().Debugf("Match %d: RadiantScore=%d DireScore=%d GameMode=%d gameModeName=%q",
+			match.MatchID, match.RadiantScore, match.DireScore, match.GameMode, gameModeName)
+	}
+
+	// W/L del héroe desde Stratz
+	heroRecordText := "N/A"
+	if b.stratzClient != nil && b.stratzClient.IsConfigured() {
+		accountIDInt, _ := strconv.ParseInt(accountID, 10, 64)
+		heroWL, err := b.stratzClient.GetPlayerWinLoss(accountIDInt, 20, player.HeroID)
+		if err != nil {
+			getLogger().Warnf("No se pudo obtener W/L del héroe %s para account_id %s: %v", heroName, accountID, err)
+		} else if heroWL != nil {
+			total := heroWL.Win + heroWL.Lose
+			if total > 0 {
+				winRate := float64(heroWL.Win) / float64(total) * 100
+				heroRecordText = fmt.Sprintf("%d-%d (%.1f%%)", heroWL.Win, heroWL.Lose, winRate)
+			}
+		}
+	}
+
+	// Racha desde Stratz (para footer más abajo)
+	var recentStratzMatches []dota.StratzMatch
+	if b.stratzClient != nil && b.stratzClient.IsConfigured() {
+		accountIDInt, _ := strconv.ParseInt(accountID, 10, 64)
+		recentStratzMatches, _ = b.stratzClient.GetPlayerRecentMatches(accountIDInt, 10)
+	}
+
+	// Lane outcome: resumen por línea y victoria/derrota en fase de línea (si jugó una línea; jungle/roaming no se marca)
+	lanePhaseLine, laneSummary := b.buildLaneOutcomeText(match, player)
+
+	// Título: nombre [RANGO] - Victoria/Derrota (rango solo si está disponible)
+	title := fmt.Sprintf("%s - %s", personaname, resultText)
+	if profile != nil && profile.RankBracket != "" {
+		title = fmt.Sprintf("%s [%s] - %s", personaname, profile.RankBracket, resultText)
+	}
+
+	description := fmt.Sprintf("**%s** | %s", heroName, gameModeDisplayName)
+	if lanePhaseLine != "" {
+		description += "\n" + lanePhaseLine
+	}
+
+	// Construir embed: Image = héroe (abajo); Thumbnail solo si hay avatar del jugador (nunca icono del héroe ahí)
 	embed := &discordgo.MessageEmbed{
-		Title:       fmt.Sprintf("%s - %s", personaname, resultText),
-		Description: fmt.Sprintf("**%s** | %s", heroName, gameModeName),
+		Title:       title,
+		Description: description,
 		Color:       resultColor,
 		Image: &discordgo.MessageEmbedImage{
 			URL: heroImg,
-		},
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL: avatarURL,
 		},
 		Fields: []*discordgo.MessageEmbedField{
 			{
@@ -1536,7 +1359,7 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 			},
 			{
 				Name:   "Modo",
-				Value:  fmt.Sprintf("%s (%s)", gameModeName, lobbyTypeName),
+				Value:  gameModeDisplayName,
 				Inline: true,
 			},
 			{
@@ -1548,7 +1371,40 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		Footer: &discordgo.MessageEmbedFooter{
 			Text: fmt.Sprintf("Match ID: %d", match.MatchID),
 		},
-		URL: fmt.Sprintf("https://www.dotabuff.com/matches/%d", match.MatchID),
+		URL: fmt.Sprintf("https://stratz.com/matches/%d", match.MatchID),
+	}
+	if avatarURL != "" {
+		embed.Author = &discordgo.MessageEmbedAuthor{
+			Name:    personaname,
+			IconURL: avatarURL,
+		}
+		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: avatarURL}
+	}
+
+	// Lane/Rol (si Stratz los devuelve): campo Inline
+	if player.Lane != "" || player.Role != "" {
+		laneText := player.Lane
+		if player.Role != "" {
+			if laneText != "" {
+				laneText += " / " + player.Role
+			} else {
+				laneText = player.Role
+			}
+		}
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+			Name:   "Lane / Rol",
+			Value:  laneText,
+			Inline: true,
+		})
+	}
+
+	// Resultado por línea (Stratz lane outcomes)
+	if laneSummary != "" {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+			Name:   "Resultado por línea",
+			Value:  laneSummary,
+			Inline: false,
+		})
 	}
 
 	// Agregar hero damage, tower damage, healing si están disponibles
@@ -1593,7 +1449,6 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		Player     dota.Player
 		HeroName   string
 		PlayerName string
-		Profile    *dota.PlayersResponse
 		WinLoss    *dota.WinLossResponse
 	}
 
@@ -1607,100 +1462,49 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		}
 	}
 
-	getLogger().Debugf("Verificando %d jugadores con AccountID != 0 para perfil público (en paralelo)", len(playersToCheck))
+	getLogger().Debugf("Verificando %d jugadores con AccountID != 0", len(playersToCheck))
 
-	// Usar goroutines para verificar jugadores en paralelo
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	verifiedPlayersChan := make(chan VerifiedPlayer, len(playersToCheck))
+	// Solo Stratz para W/L de jugadores
+	if b.stratzClient != nil && b.stratzClient.IsConfigured() {
+		var playerIDs []int64
+		for _, p := range playersToCheck {
+			playerIDs = append(playerIDs, int64(p.AccountID))
+		}
 
-	// Verificar cada jugador en una goroutine separada
-	for _, p := range playersToCheck {
-		wg.Add(1)
-		go func(player dota.Player) {
-			defer wg.Done()
+		wlMap, errStratz := b.stratzClient.GetMultiplePlayersWinLoss(playerIDs, 20)
+		if errStratz != nil {
+			getLogger().Warnf("Error obteniendo W/L de Stratz: %v", errStratz)
+		} else {
+			for _, p := range playersToCheck {
+				wl, ok := wlMap[int64(p.AccountID)]
+				if !ok || wl == nil {
+					continue
+				}
+				if wl.Win+wl.Lose == 0 {
+					getLogger().Debugf("  ❌ Jugador con 0/0 W/L (AccountID %d), omitiendo", p.AccountID)
+					continue
+				}
 
-			accountIDStr := strconv.Itoa(player.AccountID)
-			getLogger().Debugf("Verificando jugador AccountID: %d, HeroID: %d, Personaname: '%s'", player.AccountID, player.HeroID, player.Personaname)
+				heroName := b.dotaClient.GetHeroName(p.HeroID)
+				playerName := p.Personaname
+				if playerName == "" {
+					playerName = fmt.Sprintf("Jugador %d", p.AccountID)
+				}
 
-			// Intentar obtener el perfil del jugador
-			playerProfile, err := b.dotaClient.GetPlayerProfile(accountIDStr)
-			if err != nil {
-				getLogger().Debugf("  ❌ No se pudo obtener perfil para AccountID %d: %v", player.AccountID, err)
-				return
+				getLogger().Debugf("  ✅ Stratz: AccountID %d, Nombre: '%s', Héroe: '%s', W/L: %d/%d",
+					p.AccountID, playerName, heroName, wl.Win, wl.Lose)
+
+				verifiedPlayers = append(verifiedPlayers, VerifiedPlayer{
+					Player:     p,
+					HeroName:   heroName,
+					PlayerName: playerName,
+					WinLoss:    wl,
+				})
 			}
-
-			// Verificar que el perfil tenga datos válidos
-			if playerProfile == nil {
-				getLogger().Debugf("  ❌ Perfil nulo para AccountID %d", player.AccountID)
-				return
-			}
-
-			// Verificar que tenga información del perfil
-			if playerProfile.Profile.AccountID == 0 {
-				getLogger().Debugf("  ❌ Perfil sin AccountID válido para AccountID %d", player.AccountID)
-				return
-			}
-
-			// Intentar obtener W/L de las últimas 20 partidas para verificar que el perfil es completamente público
-			wl, err := b.dotaClient.GetWinLoss(accountIDStr, 20, 0)
-			if err != nil {
-				getLogger().Debugf("  ❌ No se pudo obtener W/L para AccountID %d (perfil no completamente público): %v", player.AccountID, err)
-				return
-			}
-
-			if wl == nil {
-				getLogger().Debugf("  ❌ W/L nulo para AccountID %d (perfil no completamente público)", player.AccountID)
-				return
-			}
-
-			// Filtrar jugadores con 0/0 W/L (perfiles sin partidas)
-			if wl.Win+wl.Lose == 0 {
-				getLogger().Debugf("  ❌ Jugador con 0/0 W/L (AccountID %d), omitiendo de la lista", player.AccountID)
-				return
-			}
-
-			// Obtener nombre del héroe
-			heroName := b.dotaClient.GetHeroName(player.HeroID)
-			
-			// Obtener nombre del jugador (preferir del perfil, luego del player, luego AccountID)
-			playerName := ""
-			if playerProfile.Profile.Personaname != "" {
-				playerName = playerProfile.Profile.Personaname
-			} else if player.Personaname != "" {
-				playerName = player.Personaname
-			} else {
-				playerName = fmt.Sprintf("Jugador %d", player.AccountID)
-			}
-
-			getLogger().Debugf("  ✅ Perfil público verificado: AccountID %d, Nombre: '%s', Héroe: '%s', W/L: %d/%d", 
-				player.AccountID, playerName, heroName, wl.Win, wl.Lose)
-
-			// Enviar jugador verificado al channel
-			verifiedPlayersChan <- VerifiedPlayer{
-				Player:     player,
-				HeroName:   heroName,
-				PlayerName: playerName,
-				Profile:    playerProfile,
-				WinLoss:    wl,
-			}
-		}(p)
+		}
 	}
 
-	// Esperar a que todas las goroutines terminen
-	go func() {
-		wg.Wait()
-		close(verifiedPlayersChan)
-	}()
-
-	// Recopilar resultados del channel
-	for vp := range verifiedPlayersChan {
-		mu.Lock()
-		verifiedPlayers = append(verifiedPlayers, vp)
-		mu.Unlock()
-	}
-
-	getLogger().Debugf("Total de jugadores con perfil público verificado: %d de %d", len(verifiedPlayers), len(playersToCheck))
+	getLogger().Debugf("Total de jugadores verificados: %d de %d", len(verifiedPlayers), len(playersToCheck))
 
 	if len(verifiedPlayers) > 0 {
 		// Separar jugadores por equipo (Radiant: 0-4, Dire: 128-132)
@@ -1729,68 +1533,39 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		sortPlayers(radiantPlayers)
 		sortPlayers(direPlayers)
 
+		// Un solo campo en el mensaje principal: Héroe | Jugador | W/L (antes del footer)
 		var playersList strings.Builder
-		const maxFieldLength = 1000 // Dejar margen para el límite de 1024 caracteres
-
-		// Función helper para agregar jugadores a la lista
+		const maxFieldLength = 1000
 		addPlayersToList := func(players []VerifiedPlayer, teamName string) bool {
 			if len(players) == 0 {
 				return true
 			}
-
-			// Agregar encabezado del equipo
 			header := fmt.Sprintf("**%s**\n", teamName)
 			if playersList.Len()+len(header) > maxFieldLength {
 				return false
 			}
 			playersList.WriteString(header)
-
 			for _, vp := range players {
-				dotabuffURL := fmt.Sprintf("https://www.dotabuff.com/players/%d", vp.Player.AccountID)
-				
-				// Formatear W/L
+				stratzURL := fmt.Sprintf("https://stratz.com/players/%d", vp.Player.AccountID)
 				wlText := "N/A"
 				if vp.WinLoss != nil {
 					total := vp.WinLoss.Win + vp.WinLoss.Lose
 					if total > 0 {
 						winRate := float64(vp.WinLoss.Win) / float64(total) * 100
 						wlText = fmt.Sprintf("%d/%d (%.1f%%)", vp.WinLoss.Win, vp.WinLoss.Lose, winRate)
-					} else {
-						wlText = "0/0"
 					}
 				}
-				
-				line := fmt.Sprintf("%s | [%s](%s) | ID: %d | W/L: %s\n", 
-					vp.HeroName, vp.PlayerName, dotabuffURL, vp.Player.AccountID, wlText)
-
-				// Verificar si agregar esta línea excedería el límite
+				line := fmt.Sprintf("%s | [%s](%s) | W/L: %s\n", vp.HeroName, vp.PlayerName, stratzURL, wlText)
 				if playersList.Len()+len(line) > maxFieldLength {
 					playersList.WriteString("... y más")
 					return false
 				}
-
 				playersList.WriteString(line)
 			}
-
-			// Agregar separador entre equipos si hay Dire después
-			if len(direPlayers) > 0 {
-				separator := "\n"
-				if playersList.Len()+len(separator) > maxFieldLength {
-					return false
-				}
-				playersList.WriteString(separator)
-			}
-
 			return true
 		}
-
-		// Agregar primero Radiant, luego Dire
-		if !addPlayersToList(radiantPlayers, "☀️ Radiant") {
-			// Si se excedió el límite, no agregar Dire
-		} else {
-			addPlayersToList(direPlayers, "🌙 Dire")
-		}
-
+		addPlayersToList(radiantPlayers, "☀️ Radiant")
+		addPlayersToList(direPlayers, "🌙 Dire")
 		if playersList.Len() > 0 {
 			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
 				Name:   "👥 Jugadores (Perfiles Públicos)",
@@ -1800,17 +1575,13 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		}
 	}
 
-	// Agregar racha en el footer
-	if err == nil && len(recentMatches) > 0 {
-		limit := 10
-		if len(recentMatches) < limit {
-			limit = len(recentMatches)
-		}
-		streak := b.dotaClient.AnalyzeStreak(recentMatches[:limit])
+	// Agregar racha en el footer (desde Stratz)
+	if len(recentStratzMatches) > 0 {
+		accountIDInt, _ := strconv.ParseInt(accountID, 10, 64)
+		streak := dota.AnalyzeStreakFromStratzMatches(recentStratzMatches, accountIDInt)
 		embed.Footer.Text = fmt.Sprintf("%s | Match ID: %d", streak.CurrentStreak, match.MatchID)
 	}
 
-	_, err = b.session.ChannelMessageSendEmbed(channelID, embed)
+	_, err := b.session.ChannelMessageSendEmbed(channelID, embed)
 	return err
 }
-

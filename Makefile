@@ -19,11 +19,17 @@ push:
 all: build push
 	@echo "✅ Build y push completados"
 
+# Descargar imágenes de héroes (Steam CDN) a dota/miniaturas/
+download-hero-images:
+	@echo "Descargando imágenes de héroes a dota/miniaturas/ ..."
+	go run ./cmd/download_hero_images
+
 # Ayuda
 help:
 	@echo "Comandos disponibles:"
 	@echo "  make build  - Construir la imagen Docker"
 	@echo "  make push   - Subir la imagen al registry"
 	@echo "  make all    - Construir y subir la imagen"
+	@echo "  make download-hero-images - Descargar imágenes de héroes a dota/miniaturas/"
 	@echo "  make help   - Mostrar esta ayuda"
 

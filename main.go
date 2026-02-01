@@ -53,14 +53,22 @@ func main() {
 		logrus.Fatalf("Error creando almacenamiento: %v", err)
 	}
 
-	// Crear cliente de Dota API
+	// Cliente OpenDota: código conservado pero no se usa (solo Stratz)
 	dotaClient := dota.NewClient()
 
-	// Cargar constants al inicio (se cargarán automáticamente cuando se necesiten)
-	logrus.Info("Bot listo. Los constants se cargarán automáticamente cuando se necesiten.")
+	// Stratz es obligatorio: el bot usa solo la API de Stratz
+	if cfg.StratzToken == "" {
+		logrus.Fatal("STRATZ_TOKEN es obligatorio. El bot usa solo la API de Stratz. Configura STRATZ_TOKEN en .env")
+	}
+	stratzClient := dota.NewStratzClient(cfg.StratzToken)
+	if cfg.Debug {
+		stratzClient.SetDebug(true)
+		logrus.Info("Debug Stratz activado: request/response en logs/stratz_debug.log")
+	}
+	logrus.Info("Cliente de Stratz configurado (solo Stratz)")
 
 	// Crear bot
-	bot, err := discord.NewBot(cfg, dotaClient, userStore)
+	bot, err := discord.NewBot(cfg, dotaClient, stratzClient, userStore)
 	if err != nil {
 		logrus.Fatalf("Error creando bot: %v", err)
 	}
@@ -72,26 +80,23 @@ func main() {
 
 	logrus.Info("Bot corriendo. Presiona CTRL+C para salir.")
 
-	// Enviar mensaje de bienvenida al canal configurado
+	// Enviar mensaje de bienvenida y verificar partidas inmediatamente
 	go func() {
 		time.Sleep(2 * time.Second) // Esperar un poco para asegurar que el bot esté completamente conectado
 		if err := bot.SendWelcomeMessage(); err != nil {
 			logrus.Warnf("No se pudo enviar mensaje de bienvenida: %v", err)
 		}
-	}()
-
-	// Configurar polling cada 10 minutos
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
-
-	// Ejecutar verificación inicial después de 30 segundos
-	go func() {
-		time.Sleep(30 * time.Second)
-		logrus.Info("Ejecutando verificación inicial de partidas...")
+		// Verificación INMEDIATA de partidas al iniciar
+		logrus.Info("Ejecutando verificación inmediata de partidas...")
 		if err := bot.CheckForNewMatches(); err != nil {
 			logrus.Errorf("Error en verificación inicial: %v", err)
 		}
 	}()
+
+	// Configurar polling cada REFRESH_RATE minutos (por defecto 1)
+	ticker := time.NewTicker(time.Duration(cfg.RefreshRateMinutes) * time.Minute)
+	defer ticker.Stop()
+	logrus.Infof("Verificación de partidas cada %d minuto(s)", cfg.RefreshRateMinutes)
 
 	// Loop de polling
 	go func() {
@@ -103,6 +108,9 @@ func main() {
 		}
 	}()
 
+	// Scheduler diario de stats (STATS_TIME en .env, ej. 20:00)
+	go bot.RunStatsScheduler()
+
 	// Esperar señal de interrupción
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
@@ -112,4 +120,3 @@ func main() {
 	bot.Stop()
 	logrus.Info("Bot cerrado exitosamente")
 }
-

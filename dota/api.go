@@ -14,12 +14,18 @@ import (
 
 const baseURL = "https://api.opendota.com/api"
 
+const (
+	// Steam CDN para imágenes de héroes: https://cdn.steamstatic.com/apps/dota2/images/dota_react/heroes/{slug}.png
+	steamCDNHeroes = "https://cdn.steamstatic.com/apps/dota2/images/dota_react/heroes"
+)
+
 type Client struct {
-	httpClient   *http.Client
-	heroesCache  map[int]string
-	heroImages   map[int]string
-	gameModes    map[int]string
-	lobbyTypes   map[int]string
+	httpClient      *http.Client
+	heroesCache     map[int]string
+	heroImages      map[int]string
+	heroSlugCache   map[int]string
+	gameModes       map[int]string
+	lobbyTypes      map[int]string
 	lastCacheUpdate time.Time
 }
 
@@ -28,73 +34,79 @@ func NewClient() *Client {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		heroesCache: make(map[int]string),
-		heroImages:  make(map[int]string),
-		gameModes:   make(map[int]string),
-		lobbyTypes:  make(map[int]string),
+		heroesCache:   make(map[int]string),
+		heroImages:    make(map[int]string),
+		heroSlugCache: make(map[int]string),
+		gameModes:     make(map[int]string),
+		lobbyTypes:    make(map[int]string),
 	}
 }
 
 // SearchResponse representa un resultado de búsqueda
 type SearchResponse struct {
-	AccountID      int    `json:"account_id"`
-	Personaname    string `json:"personaname"`
-	Avatarfull     string `json:"avatarfull"`
-	LastMatchTime  string `json:"last_match_time"`
-	Similarity     float64 `json:"similarity"`
+	AccountID     int     `json:"account_id"`
+	Personaname   string  `json:"personaname"`
+	Avatarfull    string  `json:"avatarfull"`
+	LastMatchTime string  `json:"last_match_time"`
+	Similarity    float64 `json:"similarity"`
 }
 
 // PlayerRecentMatch representa una partida reciente
 type PlayerRecentMatch struct {
-	MatchID    int64  `json:"match_id"`
-	PlayerSlot int    `json:"player_slot"`
-	RadiantWin *bool  `json:"radiant_win"`
-	Duration   int    `json:"duration"`
-	GameMode   int    `json:"game_mode"`
-	LobbyType  int    `json:"lobby_type"`
-	HeroID     int    `json:"hero_id"`
-	StartTime  int64  `json:"start_time"`
-	Kills      int    `json:"kills"`
-	Deaths     int    `json:"deaths"`
-	Assists    int    `json:"assists"`
-	Win        *int   `json:"win"`
-	Lose       *int   `json:"lose"`
-	IsRadiant  *bool  `json:"isRadiant"`
+	MatchID    int64 `json:"match_id"`
+	PlayerSlot int   `json:"player_slot"`
+	RadiantWin *bool `json:"radiant_win"`
+	Duration   int   `json:"duration"`
+	GameMode   int   `json:"game_mode"`
+	LobbyType  int   `json:"lobby_type"`
+	HeroID     int   `json:"hero_id"`
+	StartTime  int64 `json:"start_time"`
+	Kills      int   `json:"kills"`
+	Deaths     int   `json:"deaths"`
+	Assists    int   `json:"assists"`
+	Win        *int  `json:"win"`
+	Lose       *int  `json:"lose"`
+	IsRadiant  *bool `json:"isRadiant"`
 }
 
 // MatchResponse representa una partida completa
 type MatchResponse struct {
-	MatchID      int64   `json:"match_id"`
-	RadiantWin   *bool   `json:"radiant_win"`
-	Duration     int     `json:"duration"`
-	StartTime    int64   `json:"start_time"`
-	GameMode     int     `json:"game_mode"`
-	LobbyType    int     `json:"lobby_type"`
-	RadiantScore int     `json:"radiant_score"`
-	DireScore    int     `json:"dire_score"`
-	Players      []Player `json:"players"`
+	MatchID           int64    `json:"match_id"`
+	RadiantWin        *bool    `json:"radiant_win"`
+	Duration          int      `json:"duration"`
+	StartTime         int64    `json:"start_time"`
+	GameMode          int      `json:"game_mode"`
+	LobbyType         int      `json:"lobby_type"`
+	RadiantScore      int      `json:"radiant_score"`
+	DireScore         int      `json:"dire_score"`
+	Players           []Player `json:"players"`
+	TopLaneOutcome    string   `json:"top_lane_outcome"`    // TIE, RADIANT_VICTORY, RADIANT_STOMP, DIRE_VICTORY, DIRE_STOMP
+	MidLaneOutcome    string   `json:"mid_lane_outcome"`    // idem
+	BottomLaneOutcome string   `json:"bottom_lane_outcome"` // idem
 }
 
 // Player representa un jugador en una partida
 type Player struct {
-	AccountID    int     `json:"account_id"`
-	PlayerSlot   int     `json:"player_slot"`
-	HeroID       int     `json:"hero_id"`
-	Kills        int     `json:"kills"`
-	Deaths       int     `json:"deaths"`
-	Assists      int     `json:"assists"`
-	Win          *int    `json:"win"`
-	Lose         *int    `json:"lose"`
-	IsRadiant    *bool   `json:"isRadiant"`
-	Personaname  string  `json:"personaname"`
-	Level        int     `json:"level"`
-	GoldPerMin   int     `json:"gold_per_min"`
-	XpPerMin     int     `json:"xp_per_min"`
-	HeroDamage   int     `json:"hero_damage"`
-	TowerDamage  int     `json:"tower_damage"`
-	HeroHealing  int     `json:"hero_healing"`
-	KDA          float64 `json:"kda"`
-	RankTier     *int    `json:"rank_tier"`
+	AccountID   int     `json:"account_id"`
+	PlayerSlot  int     `json:"player_slot"`
+	HeroID      int     `json:"hero_id"`
+	Kills       int     `json:"kills"`
+	Deaths      int     `json:"deaths"`
+	Assists     int     `json:"assists"`
+	Win         *int    `json:"win"`
+	Lose        *int    `json:"lose"`
+	IsRadiant   *bool   `json:"isRadiant"`
+	Personaname string  `json:"personaname"`
+	Level       int     `json:"level"`
+	GoldPerMin  int     `json:"gold_per_min"`
+	XpPerMin    int     `json:"xp_per_min"`
+	HeroDamage  int     `json:"hero_damage"`
+	TowerDamage int     `json:"tower_damage"`
+	HeroHealing int     `json:"hero_healing"`
+	KDA         float64 `json:"kda"`
+	RankTier    *int    `json:"rank_tier"`
+	Lane        string  `json:"lane"` // lane/rol del jugador (Stratz: SAFE_LANE, MID_LANE, etc.)
+	Role        string  `json:"role"` // CORE, SUPPORT, etc.
 }
 
 // PlayersResponse representa el perfil de un jugador
@@ -110,14 +122,15 @@ type PlayersResponse struct {
 	RankTier        *int     `json:"rank_tier"`
 	LeaderboardRank *int     `json:"leaderboard_rank"`
 	ComputedMMR     *float64 `json:"computed_mmr"`
+	RankBracket     string   `json:"rank_bracket"` // Stratz: UNCALIBRATED, HERALD, GUARDIAN, CRUSADER, ARCHON, LEGEND, ANCIENT, DIVINE, IMMORTAL
 }
 
 // Hero representa un héroe
 type Hero struct {
-	ID           int    `json:"id"`
-	Name         string `json:"name"`
+	ID            int    `json:"id"`
+	Name          string `json:"name"`
 	LocalizedName string `json:"localized_name"`
-	Img          string `json:"img"`
+	Img           string `json:"img"`
 }
 
 // WinLossResponse representa el resumen W/L de un jugador
@@ -145,32 +158,6 @@ func (c *Client) makeRequest(url string, result interface{}) error {
 		return fmt.Errorf("error decodificando respuesta: %w", err)
 	}
 
-	return nil
-}
-
-// makePostRequest realiza un POST simple sin payload y valida status 200
-func (c *Client) makePostRequest(url string) error {
-	// Rate limiting: esperar 1 segundo entre requests
-	time.Sleep(1 * time.Second)
-
-	req, err := http.NewRequest(http.MethodPost, url, nil)
-	if err != nil {
-		return fmt.Errorf("error creando request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("error en request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API retornó status %d: %s", resp.StatusCode, string(body))
-	}
-
-	// Consumir el body para no dejarlo abierto (aunque no lo usemos)
-	_, _ = io.ReadAll(resp.Body)
 	return nil
 }
 
@@ -224,12 +211,12 @@ func (c *Client) GetWinLoss(accountID string, limit int, heroID int) (*WinLossRe
 	if len(queryParams) > 0 {
 		url = fmt.Sprintf("%s?%s", url, strings.Join(queryParams, "&"))
 	}
-	
+
 	// Debug: log de la URL construida cuando se filtra por héroe
 	if heroID > 0 {
 		fmt.Printf("[DEBUG] GetWinLoss con hero_id: URL=%s, accountID=%s, limit=%d, heroID=%d\n", url, accountID, limit, heroID)
 	}
-	
+
 	var wl WinLossResponse
 	if err := c.makeRequest(url, &wl); err != nil {
 		if heroID > 0 {
@@ -237,18 +224,12 @@ func (c *Client) GetWinLoss(accountID string, limit int, heroID int) (*WinLossRe
 		}
 		return nil, err
 	}
-	
+
 	if heroID > 0 {
 		fmt.Printf("[DEBUG] GetWinLoss con hero_id exitoso: Win=%d, Lose=%d\n", wl.Win, wl.Lose)
 	}
-	
-	return &wl, nil
-}
 
-// RefreshPlayer fuerza refresh de historial, medalla y nombre del perfil
-func (c *Client) RefreshPlayer(accountID string) error {
-	url := fmt.Sprintf("%s/players/%s/refresh", baseURL, accountID)
-	return c.makePostRequest(url)
+	return &wl, nil
 }
 
 func (c *Client) FindPlayerInMatch(match *MatchResponse, accountID string) (*Player, error) {
@@ -358,6 +339,12 @@ func (c *Client) LoadConstants() error {
 	for _, hero := range heroes {
 		c.heroesCache[hero.ID] = hero.LocalizedName
 		c.heroImages[hero.ID] = hero.Img
+		if hero.Name != "" {
+			slug := strings.TrimPrefix(hero.Name, "npc_dota_hero_")
+			if slug != "" {
+				c.heroSlugCache[hero.ID] = slug
+			}
+		}
 	}
 
 	// Cargar game modes
@@ -377,45 +364,30 @@ func (c *Client) LoadConstants() error {
 }
 
 func (c *Client) GetHeroName(heroID int) string {
-	// Intentar cargar desde JSON local
 	c.loadHeroesLocal()
 	if name, ok := c.heroesCache[heroID]; ok {
 		return name
-	}
-	// Fallback remoto
-	if len(c.heroesCache) == 0 || time.Since(c.lastCacheUpdate) > 24*time.Hour {
-		if err := c.LoadConstants(); err == nil {
-			if name, ok := c.heroesCache[heroID]; ok {
-				return name
-			}
-		}
 	}
 	return fmt.Sprintf("Hero %d", heroID)
 }
 
 func (c *Client) GetGameModeName(gameMode int) string {
-	// Intentar cargar desde JSON local
 	c.loadGameModesLocal()
 	if name, ok := c.gameModes[gameMode]; ok {
 		return name
 	}
-	// Fallback remoto
-	if len(c.gameModes) == 0 {
-		if err := c.LoadConstants(); err == nil {
-			if name, ok := c.gameModes[gameMode]; ok {
-				return name
-			}
-		}
-	}
 	return fmt.Sprintf("Mode %d", gameMode)
 }
 
+// GameModeDisplayName convierte el nombre interno (ej. game_mode_all_pick) a display limpio en mayúsculas (ej. ALL PICK)
+func GameModeDisplayName(internalName string) string {
+	s := strings.TrimPrefix(internalName, "game_mode_")
+	s = strings.ReplaceAll(s, "_", " ")
+	return strings.ToUpper(s)
+}
+
 func (c *Client) GetLobbyTypeName(lobbyType int) string {
-	if len(c.lobbyTypes) == 0 {
-		if err := c.LoadConstants(); err != nil {
-			return fmt.Sprintf("Lobby %d", lobbyType)
-		}
-	}
+	c.loadLobbyTypesLocal()
 	if name, ok := c.lobbyTypes[lobbyType]; ok {
 		return name
 	}
@@ -465,7 +437,7 @@ func GetRankName(rankTier *int) string {
 // --- Helpers para cargar caches locales ---
 
 func (c *Client) loadHeroesLocal() {
-	if len(c.heroesCache) > 0 && len(c.heroImages) > 0 {
+	if len(c.heroesCache) > 0 && len(c.heroSlugCache) > 0 {
 		return
 	}
 	data, err := os.ReadFile(filepath.Join("dota", "heroes.json"))
@@ -482,6 +454,12 @@ func (c *Client) loadHeroesLocal() {
 		}
 		if h.Img != "" {
 			c.heroImages[h.ID] = h.Img
+		}
+		if h.Name != "" {
+			slug := strings.TrimPrefix(h.Name, "npc_dota_hero_")
+			if slug != "" {
+				c.heroSlugCache[h.ID] = slug
+			}
 		}
 	}
 }
@@ -508,12 +486,51 @@ func (c *Client) loadGameModesLocal() {
 	}
 }
 
-// GetHeroImageURL retorna la URL completa del icono del héroe (si se tiene)
-func (c *Client) GetHeroImageURL(heroID int) string {
+func (c *Client) loadLobbyTypesLocal() {
+	if len(c.lobbyTypes) > 0 {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join("dota", "lobby_type.json"))
+	if err != nil {
+		return
+	}
+	var raw map[string]struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return
+	}
+	for _, lt := range raw {
+		if lt.Name != "" {
+			c.lobbyTypes[lt.ID] = lt.Name
+		}
+	}
+}
+
+// GetHeroSlug retorna el slug del héroe para URLs (ej. antimage, abaddon)
+func (c *Client) GetHeroSlug(heroID int) string {
 	c.loadHeroesLocal()
-	if path, ok := c.heroImages[heroID]; ok && path != "" {
-		return fmt.Sprintf("https://api.opendota.com%s", path)
+	if slug, ok := c.heroSlugCache[heroID]; ok {
+		return slug
 	}
 	return ""
 }
 
+// GetHeroImageURL retorna la URL de la imagen del héroe desde Steam CDN (dota_react/heroes/{slug}.png)
+func (c *Client) GetHeroImageURL(heroID int) string {
+	c.loadHeroesLocal()
+	if slug, ok := c.heroSlugCache[heroID]; ok && slug != "" {
+		return fmt.Sprintf("%s/%s.png", steamCDNHeroes, slug)
+	}
+	return ""
+}
+
+// GetHeroIconURL retorna la URL del icono/miniatura del héroe desde Steam CDN (mismo CDN que imagen)
+func (c *Client) GetHeroIconURL(heroID int) string {
+	c.loadHeroesLocal()
+	if slug, ok := c.heroSlugCache[heroID]; ok && slug != "" {
+		return fmt.Sprintf("%s/%s.png", steamCDNHeroes, slug)
+	}
+	return ""
+}

@@ -1,0 +1,121 @@
+{
+  "project": "Discord Dota Bot",
+  "branchName": "ralph/enhanced-match-notifications",
+  "description": "Mejorar notificaciones de partidas con record del héroe, enlaces Stratz y miniaturas de héroes",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Investigar CDN de imágenes de héroes disponibles",
+      "description": "Como desarrollador, necesito identificar la mejor fuente de imágenes de héroes (OpenDota CDN, Stratz CDN, o dota2.com) para usarlas en los embeds.",
+      "acceptanceCriteria": [
+        "Documentar URLs de CDN disponibles para imágenes de héroes",
+        "Verificar que las URLs funcionan con Discord embeds (setThumbnail)",
+        "Crear constante con la URL base del CDN elegido en el código",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Ya implementado: GetHeroImageURL en dota/api.go usa OpenDota CDN (https://api.opendota.com + path)"
+    },
+    {
+      "id": "US-002",
+      "title": "Crear servicio de imágenes de héroes",
+      "description": "Como desarrollador, necesito un servicio que proporcione las URLs de imágenes de héroes dado un hero_id.",
+      "acceptanceCriteria": [
+        "Método GetHeroImageURL(heroId) que retorna URL del CDN",
+        "Carga local de héroes desde dota/heroes.json",
+        "Fallback a API remota si no existe local",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "Ya implementado en dota/api.go:512-518 - GetHeroImageURL(heroID int) string"
+    },
+    {
+      "id": "US-003",
+      "title": "Agregar record del héroe a notificaciones automáticas",
+      "description": "Como usuario, quiero ver mi record con el héroe usado (W/L últimas 20 partidas) en las notificaciones automáticas.",
+      "acceptanceCriteria": [
+        "Modificar sendMatchNotification en bot.go",
+        "Llamar a GetWinLoss() con heroID para obtener el record",
+        "Mostrar 'Record con [Héroe]: X-Y (últ. 20)' en el embed",
+        "Si no hay datos, mostrar 'N/A'",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Ya implementado en sendMatchNotification líneas 1478-1546"
+    },
+    {
+      "id": "US-004",
+      "title": "Cambiar URL de partida a Stratz",
+      "description": "Como usuario, quiero que el enlace de la partida apunte a Stratz para ver detalles más completos.",
+      "acceptanceCriteria": [
+        "Cambiar URL de partida a formato https://stratz.com/matches/[MATCH_ID]",
+        "Aplicar en notificaciones automáticas (sendMatchNotification)",
+        "El título del embed debe ser clickeable con la URL de Stratz",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "Implementado: URLs cambiadas de Dotabuff a Stratz en sendMatchNotification y handleStatsSlash"
+    },
+    {
+      "id": "US-005",
+      "title": "Cambiar URLs de jugadores a Stratz con lógica condicional",
+      "description": "Como usuario, quiero que los jugadores con datos tengan enlace a Stratz y los sin datos (0/0) no tengan enlace.",
+      "acceptanceCriteria": [
+        "Jugadores con wins > 0 OR losses > 0 tienen enlace https://stratz.com/players/[ACCOUNT_ID]",
+        "Jugadores con 0 wins Y 0 losses muestran solo texto sin enlace",
+        "Formato con enlace: '[Héroe] | [Nombre](URL) | W/L: X/Y'",
+        "Formato sin enlace: '[Héroe] | [Nombre] | W/L: 0/0'",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Implementado: lógica condicional hasData para mostrar/ocultar enlaces"
+    },
+    {
+      "id": "US-006",
+      "title": "Agregar miniatura del héroe al embed de notificación",
+      "description": "Como usuario, quiero ver la miniatura del héroe que usé en el mensaje de notificación.",
+      "acceptanceCriteria": [
+        "Usar Image en embed con URL del servicio de imágenes",
+        "Obtener heroId de los datos del jugador",
+        "Si la imagen no está disponible, no romper el mensaje",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Ya implementado en sendMatchNotification con embed.Image"
+    },
+    {
+      "id": "US-007",
+      "title": "Unificar comando /dota stats con formato de notificaciones",
+      "description": "Como usuario, quiero que /dota stats muestre el mismo formato que las notificaciones automáticas.",
+      "acceptanceCriteria": [
+        "Ambos muestran: resultado, héroe, KDA, record, URL Stratz, thumbnail",
+        "handleStatsSlash usa Thumbnail en lugar de Image",
+        "URL del embed es clickeable",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "Implementado: /dota stats ahora usa Thumbnail y URL clickeable a Stratz"
+    },
+    {
+      "id": "US-008",
+      "title": "Actualizar comando /dota stats para usar URLs Stratz",
+      "description": "Como usuario, quiero que /dota stats también use enlaces de Stratz.",
+      "acceptanceCriteria": [
+        "Comando /dota stats usa URL de Stratz para la partida",
+        "handleUpdateSlash usa URL de Stratz",
+        "Muestra miniatura del héroe como Thumbnail",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Implementado: handleStatsSlash y handleUpdateSlash usan Stratz URLs"
+    }
+  ]
+}

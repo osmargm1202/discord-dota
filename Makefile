@@ -8,12 +8,8 @@ FULL_IMAGE := $(IMAGE_NAME):$(TAG)
 # Build de la imagen Docker
 build:
 	@echo "🔨 Construyendo imagen Docker: $(FULL_IMAGE)"
-	docker build -t $(FULL_IMAGE) .
+	docker build --push -t $(FULL_IMAGE) .
 
-# Push de la imagen al registry
-push:
-	@echo "📤 Subiendo imagen Docker: $(FULL_IMAGE)"
-	docker push $(FULL_IMAGE)
 
 # Build y push en un solo comando
 all: build push

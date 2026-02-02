@@ -974,6 +974,12 @@ func (b *Bot) CheckForNewMatches() error {
 			continue
 		}
 
+		// Esperar 10s tras partida parseada para que Stratz tenga listos todos los datos del parseo (imp, award, etc.)
+		if matchDetailsStratz != nil && dota.IsMatchParsed(matchDetailsStratz) {
+			getLogger().Debugf("Partida %d parseada (parsedDateTime presente), esperando 10s antes de solicitar datos", latestStratzMatch.ID)
+			time.Sleep(10 * time.Second)
+		}
+
 		// Buscar al jugador en la partida
 		var playerStratz *dota.StratzPlayer
 		for i := range matchDetailsStratz.Players {

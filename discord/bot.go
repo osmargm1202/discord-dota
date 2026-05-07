@@ -1134,6 +1134,20 @@ func formatIMP(imp int) string {
 	return strconv.Itoa(imp)
 }
 
+// formatAwardSymbol devuelve el símbolo para MVP, TOP_CORE, TOP_SUPPORT en la lista de jugadores; "" si NONE.
+func formatAwardSymbol(award string) string {
+	switch strings.ToUpper(award) {
+	case "MVP":
+		return " ⭐ MVP"
+	case "TOP_CORE":
+		return " 🏆 Core"
+	case "TOP_SUPPORT":
+		return " 🛡️ Support"
+	default:
+		return ""
+	}
+}
+
 // formatAnalysisOutcome devuelve el texto del tipo de victoria para el título (NONE = "", STOMPED = "Paliza", COMEBACK = "Comeback", CLOSE_GAME = "Juego pegado").
 func formatAnalysisOutcome(outcome string) string {
 	switch strings.ToUpper(outcome) {
@@ -1580,7 +1594,8 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 				heroName = fmt.Sprintf("Hero %d", p.HeroID)
 			}
 			impStr := formatIMP(p.Imp)
-			line := fmt.Sprintf("%s (IMP: %s)", heroName, impStr)
+			awardStr := formatAwardSymbol(p.Award)
+			line := fmt.Sprintf("%s (IMP: %s)%s", heroName, impStr, awardStr)
 			if vp, ok := verifiedByAccountID[p.AccountID]; ok {
 				stratzURL := fmt.Sprintf("https://stratz.com/players/%d", p.AccountID)
 				wlText := "N/A"

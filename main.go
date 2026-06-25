@@ -144,6 +144,10 @@ func main() {
 			if err := rankingUpdater.InitChannel(); err != nil {
 				logrus.Errorf("ranking init: %v", err)
 			}
+			// Refresh with existing data on startup (no-op if no data this week)
+			if err := rankingUpdater.Refresh(time.Now()); err != nil {
+				logrus.Errorf("ranking startup refresh: %v", err)
+			}
 		}()
 	}
 
@@ -166,11 +170,20 @@ func main() {
 		go func() {
 			time.Sleep(15 * time.Second)
 			bfSvc.Run()
+			// After backfill (display_names updated), refresh ranking with correct names
+			if rankingUpdater := bot.GetRankingUpdater(); rankingUpdater != nil {
+				if err := rankingUpdater.Refresh(time.Now()); err != nil {
+					logrus.Warnf("ranking refresh after backfill: %v", err)
+				}
+			}
 			// Re-run every 6h — catches users registered after initial startup
 			ticker := time.NewTicker(6 * time.Hour)
 			defer ticker.Stop()
 			for range ticker.C {
 				bfSvc.Run()
+				if rankingUpdater := bot.GetRankingUpdater(); rankingUpdater != nil {
+					_ = rankingUpdater.Refresh(time.Now())
+				}
 			}
 		}()
 	}

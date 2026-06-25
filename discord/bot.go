@@ -239,6 +239,9 @@ func (b *Bot) Session() *discordgo.Session { return b.session }
 // SetRankingUpdater sets the ranking updater after bot creation.
 func (b *Bot) SetRankingUpdater(u *ranking.Updater) { b.rankingUpdater = u }
 
+// GetRankingUpdater returns the ranking updater (nil if not configured).
+func (b *Bot) GetRankingUpdater() *ranking.Updater { return b.rankingUpdater }
+
 // SetBackfillService stores the backfill service so commands can trigger it.
 func (b *Bot) SetBackfillService(s *backfill.Service) { b.backfillSvc = s }
 

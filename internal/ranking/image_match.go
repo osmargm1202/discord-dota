@@ -115,31 +115,37 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 	dc.DrawRectangle(0, heroH-4, w, 4)
 	dc.Fill()
 
-	// Result text (top-left)
-	g.loadFont(dc, 26)
+	// Result badge box (top-right corner of hero header)
+	const badgeW = 210.0
+	const badgeH = 58.0
+	badgeX := w - badgeW - paddingL
+	badgeY := y + (heroH-badgeH)/2
 	dc.SetColor(resultColor)
-	dc.DrawStringAnchored(resultText, paddingL, y+34, 0, 0.5)
-
-	// Analysis badge (top-right)
+	dc.DrawRoundedRectangle(badgeX, badgeY, badgeW, badgeH, 8)
+	dc.Fill()
+	g.loadFont(dc, 22)
+	dc.SetColor(colorBG)
 	if d.AnalysisOutcome != "" {
-		g.loadFont(dc, 15)
-		dc.SetColor(colorGold)
-		dc.DrawStringAnchored(d.AnalysisOutcome, w-paddingL, y+34, 1, 0.5)
+		dc.DrawStringAnchored(resultText, badgeX+badgeW/2, badgeY+20, 0.5, 0.5)
+		g.loadFont(dc, 14)
+		dc.DrawStringAnchored(d.AnalysisOutcome, badgeX+badgeW/2, badgeY+43, 0.5, 0.5)
+	} else {
+		dc.DrawStringAnchored(resultText, badgeX+badgeW/2, badgeY+badgeH/2, 0.5, 0.5)
 	}
 
-	// Player name + rank (middle of header)
+	// Player name + rank (left side of header)
 	g.loadFont(dc, 22)
 	dc.SetColor(colorGold)
 	playerLine := d.PlayerName
 	if d.RankBracket != "" {
 		playerLine = fmt.Sprintf("%s  [%s]", d.PlayerName, d.RankBracket)
 	}
-	dc.DrawStringAnchored(playerLine, paddingL, y+80, 0, 0.5)
+	dc.DrawStringAnchored(playerLine, paddingL, y+70, 0, 0.5)
 
-	// Hero · GameMode (bottom of header)
+	// Hero · GameMode
 	g.loadFont(dc, 15)
 	dc.SetColor(colorWhite)
-	dc.DrawStringAnchored(fmt.Sprintf("%s  ·  %s", d.HeroName, d.GameMode), paddingL, y+115, 0, 0.5)
+	dc.DrawStringAnchored(fmt.Sprintf("%s  ·  %s", d.HeroName, d.GameMode), paddingL, y+110, 0, 0.5)
 
 	y += heroH + 2
 
@@ -172,9 +178,9 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 			dc.DrawStringAnchored(string([]rune(d.PlayerName)[0]), avatarX, avatarCY, 0.5, 0.5)
 		}
 	}
-	// Avatar ring in result color
-	dc.SetColor(resultColor)
-	dc.SetLineWidth(2)
+	// Subtle gold avatar border
+	dc.SetColor(colorGold)
+	dc.SetLineWidth(1.5)
 	dc.DrawCircle(avatarX, avatarCY, avatarR)
 	dc.Stroke()
 

@@ -123,11 +123,62 @@ func (u *Updater) Refresh(now time.Time) error {
 		},
 	}
 
-	// Skip entirely if no individual data this week
-	weekCheck, _ := u.calc.IndividualRanking(weekStart, weekEnd)
-	if len(weekCheck) == 0 {
-		logrus.Infof("ranking: no data for week %d-W%02d, skipping refresh", year, week)
-		return nil
+	// Find nearest week with data (up to 4 weeks back)
+	effectiveStart, effectiveEnd := weekStart, weekEnd
+	effectiveYear, effectiveWeek := year, week
+	for offset := 0; offset <= 4; offset++ {
+		t := now.AddDate(0, 0, -7*offset)
+		ws, we := WeekBounds(t)
+		rows, _ := u.calc.IndividualRanking(ws, we)
+		if len(rows) > 0 {
+			effectiveStart, effectiveEnd = ws, we
+			effectiveYear, effectiveWeek = t.ISOWeek()
+			break
+		}
+		if offset == 4 {
+			logrus.Infof("ranking: no data in last 4 weeks, skipping refresh")
+			return nil
+		}
+	}
+	// Rebuild jobs with effective week bounds
+	weekLabel = fmt.Sprintf("Semana %d-W%02d: %s → %s",
+		effectiveYear, effectiveWeek,
+		effectiveStart.Format("Mon Jan 02"),
+		effectiveEnd.AddDate(0, 0, -1).Format("Mon Jan 02, 2006"))
+	jobs = []imageJob{
+		{
+			msgType: "individual",
+			key:     fmt.Sprintf("ranking-individual-%d-W%02d.png", effectiveYear, effectiveWeek),
+			render: func() ([]byte, error) {
+				rows, err := u.calc.IndividualRanking(effectiveStart, effectiveEnd)
+				if err != nil {
+					return nil, err
+				}
+				return u.gen.RenderIndividual(rows, weekLabel)
+			},
+		},
+		{
+			msgType: "team2",
+			key:     fmt.Sprintf("ranking-team2-%d-W%02d.png", effectiveYear, effectiveWeek),
+			render: func() ([]byte, error) {
+				rows, err := u.calc.Team2Ranking(effectiveStart, effectiveEnd)
+				if err != nil {
+					return nil, err
+				}
+				return u.gen.RenderTeam2(rows, weekLabel)
+			},
+		},
+		{
+			msgType: "team3",
+			key:     fmt.Sprintf("ranking-team3-%d-W%02d.png", effectiveYear, effectiveWeek),
+			render: func() ([]byte, error) {
+				rows, err := u.calc.Team3Ranking(effectiveStart, effectiveEnd)
+				if err != nil {
+					return nil, err
+				}
+				return u.gen.RenderTeam3(rows, weekLabel)
+			},
+		},
 	}
 
 	ctx := context.Background()
@@ -175,18 +226,27 @@ func (u *Updater) Refresh(now time.Time) error {
 	return nil
 }
 
-// WeekPNG returns the current week individual ranking as raw PNG bytes (no MinIO needed).
+// WeekPNG returns the current (or last non-empty) week individual ranking as raw PNG bytes.
 func (u *Updater) WeekPNG() ([]byte, string, error) {
-	weekStart, weekEnd := WeekBounds(time.Now())
-	label := fmt.Sprintf("Semana: %s → %s",
-		weekStart.Format("Mon Jan 02"),
-		weekEnd.AddDate(0, 0, -1).Format("Mon Jan 02, 2006"))
-	players, err := u.calc.IndividualRanking(weekStart, weekEnd)
-	if err != nil {
-		return nil, label, err
+	now := time.Now()
+	for offset := 0; offset <= 4; offset++ {
+		t := now.AddDate(0, 0, -7*offset)
+		weekStart, weekEnd := WeekBounds(t)
+		year, week := t.ISOWeek()
+		label := fmt.Sprintf("Semana %d-W%02d: %s → %s",
+			year, week,
+			weekStart.Format("Mon Jan 02"),
+			weekEnd.AddDate(0, 0, -1).Format("Mon Jan 02, 2006"))
+		players, err := u.calc.IndividualRanking(weekStart, weekEnd)
+		if err != nil {
+			return nil, label, err
+		}
+		if len(players) > 0 || offset == 4 {
+			img, err := u.gen.RenderIndividual(players, label)
+			return img, label, err
+		}
 	}
-	img, err := u.gen.RenderIndividual(players, label)
-	return img, label, err
+	return nil, "", fmt.Errorf("no ranking data found")
 }
 
 // MonthPNG returns a monthly individual ranking as raw PNG bytes (no MinIO needed).

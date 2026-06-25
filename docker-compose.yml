@@ -45,8 +45,6 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-changeme}
     volumes:
       - ./minio-data:/data
-    ports:
-      - "9001:9001"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 10s

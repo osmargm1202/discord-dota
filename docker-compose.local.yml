@@ -1,0 +1,9 @@
+# Local testing override: use non-conflicting ports (9000/9001 taken by other MinIO instances)
+services:
+  discord-dota-minio:
+    ports:
+      - "9004:9000"
+      - "9005:9001"
+  discord-dota-postgres:
+    ports:
+      - "5435:5432"

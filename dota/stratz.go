@@ -505,7 +505,7 @@ func (c *StratzClient) GetPlayerProfile(steamAccountID int64) (*StratzPlayerStat
 				winCount
 				matchCount
 				ranks(seasonRankIds: [0]) {
-					rankBracket
+					rank
 				}
 			}
 		}
@@ -522,7 +522,7 @@ func (c *StratzClient) GetPlayerProfile(steamAccountID int64) (*StratzPlayerStat
 			WinCount   int `json:"winCount"`
 			MatchCount int `json:"matchCount"`
 			Ranks      []struct {
-				RankBracket string `json:"rankBracket"`
+				Rank int `json:"rank"`
 			} `json:"ranks"`
 		} `json:"player"`
 	}
@@ -532,8 +532,8 @@ func (c *StratzClient) GetPlayerProfile(steamAccountID int64) (*StratzPlayerStat
 	}
 
 	rankBracket := ""
-	if len(result.Player.Ranks) > 0 && result.Player.Ranks[0].RankBracket != "" {
-		rankBracket = result.Player.Ranks[0].RankBracket
+	if len(result.Player.Ranks) > 0 && result.Player.Ranks[0].Rank > 0 {
+		rankBracket = rankTierToString(result.Player.Ranks[0].Rank)
 	}
 
 	avatar := NormalizeSteamAvatarURL(result.Player.SteamAccount.Avatar)
@@ -546,6 +546,10 @@ func (c *StratzClient) GetPlayerProfile(steamAccountID int64) (*StratzPlayerStat
 		MatchCount:     result.Player.MatchCount,
 		RankBracket:    rankBracket,
 	}, nil
+}
+
+func rankTierToString(rank int) string {
+	return GetRankName(&rank)
 }
 
 // NormalizeSteamAvatarURL convierte avatar de Stratz (relativo o pequeño) a URL completa tamaño full para Discord.

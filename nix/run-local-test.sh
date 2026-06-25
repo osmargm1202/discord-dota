@@ -48,7 +48,7 @@ trap cleanup EXIT INT TERM
 
 # ---- PostgreSQL local ----
 echo "==> Iniciando PostgreSQL local en puerto $PG_PORT..."
-initdb -D "$PG_DIR" --auth=trust --username=dotabot -q
+initdb -D "$PG_DIR" --auth=trust --username=dotabot 2>/dev/null
 cat >> "$PG_DIR/postgresql.conf" <<EOF
 port = $PG_PORT
 unix_socket_directories = '$PG_SOCKET'

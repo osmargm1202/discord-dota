@@ -55,7 +55,7 @@ func (u *Updater) InitChannel() error {
 		if msgID != "" {
 			continue
 		}
-		msg, err := u.session.ChannelMessageSend(u.channelID, fmt.Sprintf("*(cargando ranking %s...)*", t))
+		msg, err := u.session.ChannelMessageSend(u.channelID, "*(ranking se actualizará cuando haya partidas registradas)*")
 		if err != nil {
 			return fmt.Errorf("send initial message %s: %w", t, err)
 		}
@@ -64,7 +64,8 @@ func (u *Updater) InitChannel() error {
 		}
 		logrus.Infof("ranking: created pinned message %s: %s", t, msg.ID)
 	}
-	return u.Refresh(time.Now())
+	// No llamar Refresh aquí — se activa con la primera partida real
+	return nil
 }
 
 // Refresh recalculates, regenerates PNGs, and edits the 3 Discord messages as file attachments.
@@ -120,6 +121,13 @@ func (u *Updater) Refresh(now time.Time) error {
 				return u.gen.RenderTeam3(rows, weekLabel)
 			},
 		},
+	}
+
+	// Skip entirely if no individual data this week
+	weekCheck, _ := u.calc.IndividualRanking(weekStart, weekEnd)
+	if len(weekCheck) == 0 {
+		logrus.Infof("ranking: no data for week %d-W%02d, skipping refresh", year, week)
+		return nil
 	}
 
 	ctx := context.Background()

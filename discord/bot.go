@@ -34,6 +34,7 @@ type Bot struct {
 	minioClient    *minioclient.Client
 	rankingUpdater *ranking.Updater
 	backfillSvc    *backfill.Service
+	initialRunDone bool // false on first CheckForNewMatches — always processes latest match
 }
 
 func NewBot(cfg *config.Config, dotaClient *dota.Client, stratzClient *dota.StratzClient, userStore *storage.UserStore, database *dbpkg.DB, minioClient *minioclient.Client) (*Bot, error) {
@@ -1016,6 +1017,10 @@ func (b *Bot) CheckForNewMatches() error {
 		return nil
 	}
 
+	// On first run after startup: always show the latest match per user (catch-up)
+	isInitialRun := !b.initialRunDone
+	b.initialRunDone = true
+
 	for discordID, accountID := range users {
 		lastMatchID, hasLastMatch := b.userStore.GetLastMatch(discordID)
 
@@ -1037,8 +1042,15 @@ func (b *Bot) CheckForNewMatches() error {
 		}
 
 		latestStratzMatch := matches[0]
-		if hasLastMatch && latestStratzMatch.ID == lastMatchID {
+
+		// Skip if already processed — UNLESS this is the initial run (catch-up on startup)
+		if !isInitialRun && hasLastMatch && latestStratzMatch.ID == lastMatchID {
 			continue
+		}
+		// On initial run with an already-processed match: show but don't re-save (avoid duplicate on next tick)
+		alreadyProcessed := hasLastMatch && latestStratzMatch.ID == lastMatchID
+		if isInitialRun && alreadyProcessed {
+			getLogger().Infof("Arranque: mostrando última partida conocida %d para %s", latestStratzMatch.ID, accountID)
 		}
 
 		getLogger().Infof("Nueva partida detectada para %s: %d", accountID, latestStratzMatch.ID)
@@ -1132,8 +1144,11 @@ func (b *Bot) CheckForNewMatches() error {
 			continue
 		}
 
-		if err := b.userStore.SetLastMatch(discordID, latestStratzMatch.ID); err != nil {
-			getLogger().Errorf("Error guardando última partida: %v", err)
+		// Don't overwrite last match ID if this was just a catch-up display (already processed)
+		if !alreadyProcessed {
+			if err := b.userStore.SetLastMatch(discordID, latestStratzMatch.ID); err != nil {
+				getLogger().Errorf("Error guardando última partida: %v", err)
+			}
 		}
 
 		time.Sleep(2 * time.Second)

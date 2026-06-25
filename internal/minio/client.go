@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -52,6 +54,43 @@ func (c *Client) Upload(ctx context.Context, key string, data []byte) (string, e
 		return "", fmt.Errorf("put object %s: %w", key, err)
 	}
 	return fmt.Sprintf("%s/%s/%s", c.publicURL, c.bucket, key), nil
+}
+
+// GetOrFetchAsset returns asset bytes from MinIO cache; downloads from sourceURL on cache miss.
+// Key example: "assets/heroes/12.png", "assets/avatars/136201811.png"
+func (c *Client) GetOrFetchAsset(ctx context.Context, key, sourceURL string) ([]byte, error) {
+	// Try cache first
+	obj, err := c.mc.GetObject(ctx, c.bucket, key, minio.GetObjectOptions{})
+	if err == nil {
+		data, readErr := io.ReadAll(obj)
+		obj.Close()
+		if readErr == nil && len(data) > 0 {
+			return data, nil
+		}
+	}
+
+	// Download from source
+	resp, err := http.Get(sourceURL) //nolint:gosec
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", sourceURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("download %s: status %d", sourceURL, resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store in cache (best-effort)
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "image/png"
+	}
+	_, _ = c.mc.PutObject(ctx, c.bucket, key, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{ContentType: ct})
+
+	return data, nil
 }
 
 // CleanOldObjects deletes objects under prefix older than maxAge.

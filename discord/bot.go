@@ -12,6 +12,8 @@ import (
 	"dota-discord-bot/storage"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -1232,6 +1234,19 @@ func (b *Bot) RunStatsScheduler() {
 }
 
 // formatIMP formatea el IMP (Individual Match Performance) con signo, ej. "+8" o "-10".
+// fetchImageBytes downloads bytes from a URL (best-effort, no retries).
+func fetchImageBytes(url string) ([]byte, error) {
+	resp, err := http.Get(url) //nolint:gosec
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
 func formatIMP(imp int) string {
 	if imp >= 0 {
 		return fmt.Sprintf("+%d", imp)
@@ -1758,6 +1773,63 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 	}
 
 	stratzURL := fmt.Sprintf("https://stratz.com/matches/%d", match.MatchID)
+
+	// Download hero image + avatar (cached in MinIO when available)
+	var heroImgBytes, avatarBytes []byte
+	{
+		ctx := context.Background()
+		if b.minioClient != nil {
+			heroImgBytes, _ = b.minioClient.GetOrFetchAsset(ctx,
+				fmt.Sprintf("assets/heroes/%d.png", player.HeroID), heroImg)
+			if avatarURL != "" {
+				avatarBytes, _ = b.minioClient.GetOrFetchAsset(ctx,
+					fmt.Sprintf("assets/avatars/%d.jpg", player.AccountID), avatarURL)
+			}
+		} else {
+			if heroImg != "" {
+				heroImgBytes, _ = fetchImageBytes(heroImg)
+			}
+			if avatarURL != "" {
+				avatarBytes, _ = fetchImageBytes(avatarURL)
+			}
+		}
+	}
+
+	// Build 5v5 player list for PNG
+	buildMatchPlayer := func(p dota.Player, isMain bool) ranking.MatchPlayer {
+		mp := ranking.MatchPlayer{
+			HeroName: b.dotaClient.GetHeroName(p.HeroID),
+			IsMain:   isMain,
+			WinRate:  -1,
+		}
+		if mp.HeroName == "" {
+			mp.HeroName = fmt.Sprintf("Hero %d", p.HeroID)
+		}
+		if vp, ok := verifiedByAccountID[p.AccountID]; ok {
+			mp.PlayerName = vp.PlayerName
+			if vp.WinLoss != nil {
+				total := vp.WinLoss.Win + vp.WinLoss.Lose
+				if total > 0 {
+					mp.WinRate = float64(vp.WinLoss.Win) / float64(total) * 100
+					mp.Wins = vp.WinLoss.Win
+					mp.Losses = vp.WinLoss.Lose
+				}
+			}
+		} else if isMain {
+			mp.PlayerName = personaname
+		} else {
+			mp.PlayerName = "—"
+		}
+		return mp
+	}
+	var radiantMatchPlayers, direMatchPlayers []ranking.MatchPlayer
+	for _, p := range radiantSlots {
+		radiantMatchPlayers = append(radiantMatchPlayers, buildMatchPlayer(p, p.AccountID == player.AccountID))
+	}
+	for _, p := range direSlots {
+		direMatchPlayers = append(direMatchPlayers, buildMatchPlayer(p, p.AccountID == player.AccountID))
+	}
+
 	var sendErr error
 
 	// Try PNG path when DB is available (new mode)
@@ -1786,6 +1858,10 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 			MatchID:         match.MatchID,
 			AnalysisOutcome: formatAnalysisOutcome(match.AnalysisOutcome),
 			UpdatedAt:       time.Now(),
+			HeroImgBytes:    heroImgBytes,
+			AvatarBytes:     avatarBytes,
+			RadiantPlayers:  radiantMatchPlayers,
+			DirePlayers:     direMatchPlayers,
 		}
 		gen := ranking.NewImageGenerator()
 		imgBytes, renderErr := gen.RenderMatch(matchData)

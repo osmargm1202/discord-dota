@@ -4,12 +4,20 @@ import (
 	"bytes"
 	"dota-discord-bot/fonts"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"image/color"
 	"time"
 
 	"github.com/fogleman/gg"
 	"golang.org/x/image/font/opentype"
 )
+
+// decodeImage decodes PNG or JPEG bytes into an image.Image.
+func decodeImage(data []byte) (image.Image, string, error) {
+	return image.Decode(bytes.NewReader(data))
+}
 
 const (
 	canvasW  = 820.0
@@ -170,23 +178,34 @@ func (g *ImageGenerator) drawIndivRow(dc *gg.Context, y float64, idx int, r Play
 	dc.SetColor(colorGray)
 	dc.DrawStringAnchored(rankStr, 22, y+rowH/2, 0.5, 0.5)
 
-	// avatar circle with initials
-	dc.SetColor(colorPanel)
-	dc.DrawCircle(56, y+rowH/2, 18)
-	dc.Fill()
+	// avatar circle: show image if available, initials otherwise
+	const avatarCX, avatarCY2, avatarR2 = 56.0, 0.0, 18.0 // avatarCY2 = y+rowH/2 computed below
+	circleCY := y + rowH/2
+	if len(r.AvatarBytes) > 0 {
+		if img, _, err := decodeImage(r.AvatarBytes); err == nil {
+			dc.DrawCircle(avatarCX, circleCY, avatarR2)
+			dc.Clip()
+			scaled := scaleImage(img, int(avatarR2*2), int(avatarR2*2))
+			dc.DrawImageAnchored(scaled, int(avatarCX), int(circleCY), 0.5, 0.5)
+			dc.ResetClip()
+		}
+	} else {
+		dc.SetColor(colorPanel)
+		dc.DrawCircle(avatarCX, circleCY, avatarR2)
+		dc.Fill()
+		initial := "?"
+		if len(r.DisplayName) > 0 {
+			runes := []rune(r.DisplayName)
+			initial = string(runes[0])
+		}
+		g.loadFont(dc, 14)
+		dc.SetColor(colorGold)
+		dc.DrawStringAnchored(initial, avatarCX, circleCY, 0.5, 0.5)
+	}
 	dc.SetColor(colorGold)
 	dc.SetLineWidth(1)
-	dc.DrawCircle(56, y+rowH/2, 18)
+	dc.DrawCircle(avatarCX, circleCY, avatarR2)
 	dc.Stroke()
-	// draw first letter of display name
-	initial := "?"
-	if len(r.DisplayName) > 0 {
-		runes := []rune(r.DisplayName)
-		initial = string(runes[0])
-	}
-	g.loadFont(dc, 14)
-	dc.SetColor(colorGold)
-	dc.DrawStringAnchored(initial, 56, y+rowH/2, 0.5, 0.5)
 
 	// player name
 	g.loadFont(dc, 13)

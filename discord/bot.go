@@ -37,6 +37,7 @@ type Bot struct {
 	rankingUpdater *ranking.Updater
 	backfillSvc    *backfill.Service
 	initialRunDone bool // false on first CheckForNewMatches — always processes latest match
+	matchRetries   map[string]int // "discordID:matchID" → retry count when player not found in match
 }
 
 func NewBot(cfg *config.Config, dotaClient *dota.Client, stratzClient *dota.StratzClient, userStore *storage.UserStore, database *dbpkg.DB, minioClient *minioclient.Client) (*Bot, error) {
@@ -58,6 +59,7 @@ func NewBot(cfg *config.Config, dotaClient *dota.Client, stratzClient *dota.Stra
 		searchCache:  make(map[string][]dota.SearchResponse),
 		db:           database,
 		minioClient:  minioClient,
+		matchRetries: make(map[string]int),
 	}
 
 	// Cambiar a interactionCreate para manejar slash commands
@@ -995,21 +997,36 @@ func (b *Bot) CheckForNewMatches() error {
 	getLogger().Debug("Verificando nuevas partidas...")
 
 	users := b.userStore.GetAll()
+	getLogger().Infof("CheckForNewMatches: %d usuarios en JSON store", len(users))
 	if len(users) == 0 {
-		getLogger().Debug("No hay usuarios registrados")
-		return nil
+		// Fallback: try PostgreSQL
+		if b.db != nil {
+			dbUsers, dbErr := b.db.GetAllUsers()
+			if dbErr == nil {
+				for _, u := range dbUsers {
+					if u.DiscordID != nil {
+						users[*u.DiscordID] = strconv.FormatInt(u.DotaID, 10)
+					}
+				}
+			}
+			getLogger().Infof("CheckForNewMatches: %d usuarios desde PostgreSQL", len(users))
+		}
+		if len(users) == 0 {
+			getLogger().Info("No hay usuarios registrados")
+			return nil
+		}
 	}
 
 	// Obtener canal de notificaciones
 	channelID, err := b.userStore.GetChannel()
 	if err != nil || channelID == "" {
-		// Usar canal por defecto de la configuración si está disponible
 		channelID = b.config.NotificationChannelID
 		if channelID == "" {
-			getLogger().Debug("No hay canal de notificaciones configurado")
+			getLogger().Info("No hay canal de notificaciones configurado")
 			return nil
 		}
 	}
+	getLogger().Infof("CheckForNewMatches: canal=%s", channelID)
 
 	// Validar que el channelID sea válido
 	if !isValidSnowflake(channelID) {
@@ -1018,7 +1035,7 @@ func (b *Bot) CheckForNewMatches() error {
 	}
 
 	if b.stratzClient == nil || !b.stratzClient.IsConfigured() {
-		getLogger().Debug("Stratz no configurado, omitiendo verificación de partidas")
+		getLogger().Warn("Stratz no configurado, omitiendo verificación de partidas")
 		return nil
 	}
 
@@ -1038,9 +1055,10 @@ func (b *Bot) CheckForNewMatches() error {
 		// Partidas recientes desde Stratz
 		matches, err := b.stratzClient.GetPlayerRecentMatches(accountIDInt, 5)
 		if err != nil {
-			getLogger().Errorf("Error obteniendo partidas Stratz para %s: %v", accountID, err)
+			getLogger().Errorf("Error obteniendo partidas Stratz para %s (dota_id=%d): %v", accountID, accountIDInt, err)
 			continue
 		}
+		getLogger().Infof("Stratz matches para dota_id=%d: %d encontradas", accountIDInt, len(matches))
 
 		if len(matches) == 0 {
 			continue
@@ -1112,8 +1130,25 @@ func (b *Bot) CheckForNewMatches() error {
 			}
 		}
 		if player == nil {
+			retryKey := fmt.Sprintf("%s:%d", discordID, latestStratzMatch.ID)
+			b.matchRetries[retryKey]++
+			retries := b.matchRetries[retryKey]
+			ids := make([]int, len(matchDetails.Players))
+			for j, p := range matchDetails.Players {
+				ids[j] = p.AccountID
+			}
+			getLogger().Warnf("Jugador dota_id=%d no encontrado en partida %d (intento %d). AccountIDs en match: %v", accountIDInt, latestStratzMatch.ID, retries, ids)
+			if retries >= 5 {
+				getLogger().Warnf("Máx reintentos para partida %d de %s — omitiendo definitivamente", latestStratzMatch.ID, accountID)
+				if !alreadyProcessed {
+					_ = b.userStore.SetLastMatch(discordID, latestStratzMatch.ID)
+				}
+				delete(b.matchRetries, retryKey)
+			}
 			continue
 		}
+		// Clear retry counter on success
+		delete(b.matchRetries, fmt.Sprintf("%s:%d", discordID, latestStratzMatch.ID))
 
 		var profile *dota.PlayersResponse
 		if profileStratz != nil {
@@ -1282,6 +1317,38 @@ func formatAnalysisOutcome(outcome string) string {
 		return "Juego pegado"
 	default:
 		return ""
+	}
+}
+
+// formatLaneString convierte nombres internos de lane a display legible.
+func formatLaneString(lane string) string {
+	switch strings.ToUpper(lane) {
+	case "SAFE_LANE":
+		return "Safe Lane"
+	case "OFF_LANE":
+		return "Off Lane"
+	case "MID_LANE":
+		return "Mid Lane"
+	case "JUNGLE":
+		return "Jungle"
+	case "ROAMING":
+		return "Roaming"
+	default:
+		return lane
+	}
+}
+
+// formatRoleString convierte nombres internos de role a display legible.
+func formatRoleString(role string) string {
+	switch strings.ToUpper(role) {
+	case "CORE":
+		return "Core"
+	case "LIGHT_SUPPORT":
+		return "Support"
+	case "HARD_SUPPORT":
+		return "Hard Support"
+	default:
+		return role
 	}
 }
 
@@ -1762,10 +1829,10 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 	}
 
 	// Lane/Rol string for PNG
-	laneInfo := player.Lane
+	laneInfo := formatLaneString(player.Lane)
 	if player.Role != "" {
 		if laneInfo != "" {
-			laneInfo += " / " + player.Role
+			laneInfo += " / " + formatRoleString(player.Role)
 		} else {
 			laneInfo = player.Role
 		}

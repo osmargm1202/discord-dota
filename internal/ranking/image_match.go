@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	stdraw "image/draw"
 	_ "image/jpeg"
 	_ "image/png"
+	"strings"
 	"time"
 
 	"github.com/fogleman/gg"
@@ -24,33 +26,33 @@ type MatchPlayer struct {
 
 // MatchRenderData holds all display data for a match notification PNG.
 type MatchRenderData struct {
-	PlayerName     string
-	HeroName       string
-	GameMode       string
-	RankBracket    string
-	IsWin          bool
-	KDA            string
-	Duration       string
-	Level          int
-	RadiantScore   int
-	DireScore      int
-	GPM            int
-	XPM            int
-	IMP            string
-	HeroRecord     string
-	LaneInfo       string
-	LaneOutcome    string
-	HeroDamage     int
-	TowerDamage    int
-	HeroHealing    int
-	Streak         string
-	MatchID        int64
+	PlayerName      string
+	HeroName        string
+	GameMode        string
+	RankBracket     string
+	IsWin           bool
+	KDA             string
+	Duration        string
+	Level           int
+	RadiantScore    int
+	DireScore       int
+	GPM             int
+	XPM             int
+	IMP             string
+	HeroRecord      string
+	LaneInfo        string
+	LaneOutcome     string
+	HeroDamage      int
+	TowerDamage     int
+	HeroHealing     int
+	Streak          string
+	MatchID         int64
 	AnalysisOutcome string
-	UpdatedAt      time.Time
+	UpdatedAt       time.Time
 
 	// Images (nil = skip / show fallback)
-	HeroImgBytes  []byte
-	AvatarBytes   []byte
+	HeroImgBytes []byte
+	AvatarBytes  []byte
 
 	// 5v5 player list (may be empty)
 	RadiantPlayers []MatchPlayer
@@ -60,14 +62,33 @@ type MatchRenderData struct {
 // RenderMatch generates a rich PNG card for a match notification.
 func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 	const w = canvasW
+
+	// Hero header: left = 160×160 square image; right = dark bg + text + badge
 	const heroH = 160.0
+	const heroSquareW = 160.0
+
+	// Stats bar
 	const statsH = 72.0
+	// Details row
 	const detailH = 60.0
-	const laneH = 42.0
+	// Damage row
 	const dmgH = 52.0
+	// Player list header + rows
 	const plHeaderH = 28.0
 	const plRowH = 30.0
+	// Footer
 	const footH = 42.0
+
+	// Lane section: dynamic height based on line count
+	var laneLines []string
+	laneH := 0.0
+	if strings.TrimSpace(d.LaneOutcome) != "" {
+		laneLines = strings.Split(strings.TrimSpace(d.LaneOutcome), "\n")
+		laneH = 10.0 + float64(len(laneLines))*16.0
+		if laneH < 42 {
+			laneH = 42
+		}
+	}
 
 	maxRows := len(d.RadiantPlayers)
 	if len(d.DirePlayers) > maxRows {
@@ -75,81 +96,103 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 	}
 	hasPlayers := maxRows > 0
 
+	// Count section separators (each adds 2px gap)
+	gaps := 3.0 // hero→stats, stats→detail, detail→next
 	h := heroH + statsH + detailH
-	if d.LaneOutcome != "" {
+	if laneH > 0 {
 		h += laneH
+		gaps++
 	}
 	if d.HeroDamage > 0 || d.TowerDamage > 0 || d.HeroHealing > 0 {
 		h += dmgH
+		gaps++
 	}
 	if hasPlayers {
 		h += plHeaderH + float64(maxRows)*plRowH
+		gaps++
 	}
-	h += footH
+	h += footH + gaps*2
 
 	dc := gg.NewContext(int(w), int(h))
 	g.drawBackground(dc)
 
 	resultColor := colorGreen
-	resultText := "✅  VICTORIA"
+	resultText := "VICTORIA"
 	if !d.IsWin {
 		resultColor = colorRed
-		resultText = "❌  DERROTA"
+		resultText = "DERROTA"
 	}
 
 	y := 0.0
 
-	// ── Hero art header ───────────────────────────────────────────────
-	if len(d.HeroImgBytes) > 0 {
-		if heroImg, _, err := image.Decode(bytes.NewReader(d.HeroImgBytes)); err == nil {
-			scaled := scaleImage(heroImg, int(w), int(heroH))
-			dc.DrawImage(scaled, 0, 0)
-		}
-	}
-	// Dark overlay so text is readable
-	dc.SetRGBA(0.05, 0.07, 0.12, 0.72)
+	// ── Hero header: square image left + dark bg right ────────────────────
+	// Right-side dark background (full width first, hero image will overlay left)
+	dc.SetColor(colorPanel)
 	dc.DrawRectangle(0, y, w, heroH)
 	dc.Fill()
-	// Result color accent bottom strip
+
+	// Hero image — square, cover-crop to heroSquareW × heroH
+	if len(d.HeroImgBytes) > 0 {
+		if heroImg, _, err := image.Decode(bytes.NewReader(d.HeroImgBytes)); err == nil {
+			sq := scaleToSquare(heroImg, int(heroSquareW), int(heroH))
+			dc.DrawImage(sq, 0, int(y))
+		}
+	} else {
+		// Fallback: dark panel with hero name
+		dc.SetColor(colorBG)
+		dc.DrawRectangle(0, y, heroSquareW, heroH)
+		dc.Fill()
+		g.loadFont(dc, 12)
+		dc.SetColor(colorGold)
+		dc.DrawStringAnchored(truncateStr(d.HeroName, 10), heroSquareW/2, y+heroH/2, 0.5, 0.5)
+	}
+	// Gold border around hero square (right + bottom edges)
+	dc.SetColor(colorGold)
+	dc.SetLineWidth(1.5)
+	dc.DrawRectangle(0.75, y+0.75, heroSquareW-0.75, heroH-1.5)
+	dc.Stroke()
+
+	// Result color accent strip at bottom of header
 	dc.SetColor(resultColor)
-	dc.DrawRectangle(0, heroH-4, w, 4)
+	dc.DrawRectangle(0, y+heroH-3, w, 3)
 	dc.Fill()
 
-	// Result badge box (top-right corner of hero header)
-	const badgeW = 210.0
-	const badgeH = 58.0
+	// Result badge (top-right of header)
+	const badgeW = 190.0
+	const badgeH = 56.0
 	badgeX := w - badgeW - paddingL
 	badgeY := y + (heroH-badgeH)/2
 	dc.SetColor(resultColor)
 	dc.DrawRoundedRectangle(badgeX, badgeY, badgeW, badgeH, 8)
 	dc.Fill()
-	g.loadFont(dc, 22)
+	g.loadFont(dc, 21)
 	dc.SetColor(colorBG)
 	if d.AnalysisOutcome != "" {
-		dc.DrawStringAnchored(resultText, badgeX+badgeW/2, badgeY+20, 0.5, 0.5)
-		g.loadFont(dc, 14)
-		dc.DrawStringAnchored(d.AnalysisOutcome, badgeX+badgeW/2, badgeY+43, 0.5, 0.5)
+		dc.DrawStringAnchored(resultText, badgeX+badgeW/2, badgeY+19, 0.5, 0.5)
+		g.loadFont(dc, 13)
+		dc.DrawStringAnchored(d.AnalysisOutcome, badgeX+badgeW/2, badgeY+40, 0.5, 0.5)
 	} else {
 		dc.DrawStringAnchored(resultText, badgeX+badgeW/2, badgeY+badgeH/2, 0.5, 0.5)
 	}
 
-	// Player name + rank (left side of header)
-	g.loadFont(dc, 22)
+	// Player name + rank (right area, left-aligned after hero square)
+	textX := heroSquareW + paddingL
+	g.loadFont(dc, 21)
 	dc.SetColor(colorGold)
 	playerLine := d.PlayerName
 	if d.RankBracket != "" {
 		playerLine = fmt.Sprintf("%s  [%s]", d.PlayerName, d.RankBracket)
 	}
-	dc.DrawStringAnchored(playerLine, paddingL, y+70, 0, 0.5)
+	dc.DrawStringAnchored(playerLine, textX, y+55, 0, 0.5)
 
 	// Hero · GameMode
-	g.loadFont(dc, 15)
+	g.loadFont(dc, 14)
 	dc.SetColor(colorWhite)
-	dc.DrawStringAnchored(fmt.Sprintf("%s  ·  %s", d.HeroName, d.GameMode), paddingL, y+110, 0, 0.5)
+	dc.DrawStringAnchored(fmt.Sprintf("%s  ·  %s", d.HeroName, d.GameMode), textX, y+95, 0, 0.5)
 
 	y += heroH + 2
 
-	// ── Stats bar (avatar circle + 5 stat cells) ──────────────────────
+	// ── Stats bar (avatar circle + 5 stat cells) ──────────────────────────
 	dc.SetColor(colorPanel)
 	dc.DrawRectangle(0, y, w, statsH)
 	dc.Fill()
@@ -160,12 +203,11 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 
 	if len(d.AvatarBytes) > 0 {
 		if avatarImg, _, err := image.Decode(bytes.NewReader(d.AvatarBytes)); err == nil {
-			dc.Push()
 			dc.DrawCircle(avatarX, avatarCY, avatarR)
 			dc.Clip()
 			scaled := scaleImage(avatarImg, int(avatarR*2), int(avatarR*2))
 			dc.DrawImageAnchored(scaled, int(avatarX), int(avatarCY), 0.5, 0.5)
-			dc.Pop()
+			dc.ResetClip()
 		}
 	} else {
 		// Initials fallback
@@ -178,7 +220,7 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 			dc.DrawStringAnchored(string([]rune(d.PlayerName)[0]), avatarX, avatarCY, 0.5, 0.5)
 		}
 	}
-	// Subtle gold avatar border
+	// Gold avatar border
 	dc.SetColor(colorGold)
 	dc.SetLineWidth(1.5)
 	dc.DrawCircle(avatarX, avatarCY, avatarR)
@@ -205,7 +247,7 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 	}
 	y += statsH + 2
 
-	// ── Details row: Score | Hero record | Lane ───────────────────────
+	// ── Details row: Score | Hero record | Lane ────────────────────────────
 	dc.SetColor(colorRowAlt)
 	dc.DrawRectangle(0, y, w, detailH)
 	dc.Fill()
@@ -228,20 +270,36 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 	}
 	y += detailH + 2
 
-	// ── Lane outcome (optional) ───────────────────────────────────────
-	if d.LaneOutcome != "" {
+	// ── Lane outcome (optional, multiline) ────────────────────────────────
+	if laneH > 0 {
 		dc.SetColor(colorPanel)
 		dc.DrawRectangle(0, y, w, laneH)
 		dc.Fill()
-		g.loadFont(dc, 13)
-		dc.SetColor(colorBlue)
-		dc.DrawStringAnchored("Resultado línea:", paddingL, y+laneH/2, 0, 0.5)
-		dc.SetColor(colorWhite)
-		dc.DrawStringAnchored(d.LaneOutcome, paddingL+180, y+laneH/2, 0, 0.5)
+		g.loadFont(dc, 12)
+		lineStep := 16.0
+		baseY := y + (laneH-float64(len(laneLines))*lineStep)/2 + lineStep*0.5
+		for i, line := range laneLines {
+			lineY := baseY + float64(i)*lineStep
+			// Split "Label: value" and color differently
+			if idx := strings.Index(line, ": "); idx >= 0 {
+				label := line[:idx+2]
+				value := line[idx+2:]
+				// Draw label in gray
+				dc.SetColor(colorGray)
+				lw, _ := dc.MeasureString(label)
+				dc.DrawStringAnchored(label, paddingL*2, lineY, 0, 0.5)
+				// Draw value in white
+				dc.SetColor(colorWhite)
+				dc.DrawStringAnchored(value, paddingL*2+lw, lineY, 0, 0.5)
+			} else {
+				dc.SetColor(colorWhite)
+				dc.DrawStringAnchored(line, paddingL*2, lineY, 0, 0.5)
+			}
+		}
 		y += laneH + 2
 	}
 
-	// ── Damage row (optional) ─────────────────────────────────────────
+	// ── Damage row (optional) ─────────────────────────────────────────────
 	if d.HeroDamage > 0 || d.TowerDamage > 0 || d.HeroHealing > 0 {
 		dc.SetColor(colorRowAlt)
 		dc.DrawRectangle(0, y, w, dmgH)
@@ -269,7 +327,7 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 		y += dmgH + 2
 	}
 
-	// ── 5v5 Player list ───────────────────────────────────────────────
+	// ── 5v5 Player list ───────────────────────────────────────────────────
 	if hasPlayers {
 		// Radiant header
 		dc.SetRGBA(0.08, 0.42, 0.12, 0.70)
@@ -295,7 +353,6 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 
 		for i := 0; i < maxRows; i++ {
 			rowY := y + float64(i)*plRowH
-			// Alternating row bg
 			if i%2 == 1 {
 				dc.SetRGBA(17.0/255, 24.0/255, 39.0/255, 0.45)
 				dc.DrawRectangle(0, rowY, w, plRowH)
@@ -311,7 +368,7 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 		y += float64(maxRows)*plRowH + 2
 	}
 
-	// ── Footer ────────────────────────────────────────────────────────
+	// ── Footer ────────────────────────────────────────────────────────────
 	dc.SetColor(colorPanel)
 	dc.DrawRectangle(0, y, w, footH)
 	dc.Fill()
@@ -327,10 +384,11 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 	dc.SetColor(colorGold)
 	dc.DrawStringAnchored("Stratz", w-paddingL, y+footH/2, 1, 0.5)
 
-	// Gold border
+	// Gold border — inset by half stroke width so it's fully inside the canvas
+	const borderW = 1.5
 	dc.SetColor(colorGold)
-	dc.SetLineWidth(1.5)
-	dc.DrawRectangle(0, 0, w, float64(dc.Height()))
+	dc.SetLineWidth(borderW)
+	dc.DrawRectangle(borderW/2, borderW/2, w-borderW, float64(dc.Height())-borderW)
 	dc.Stroke()
 
 	var buf bytes.Buffer
@@ -344,7 +402,6 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 func drawMatchPlayerRow(g *ImageGenerator, dc *gg.Context, p MatchPlayer, startX, colW, rowY, rowH float64) {
 	cy := rowY + rowH/2
 
-	// Highlight main player
 	if p.IsMain {
 		dc.SetRGBA(200.0/255, 170.0/255, 110.0/255, 0.12)
 		dc.DrawRectangle(startX, rowY, colW, rowH)
@@ -355,23 +412,21 @@ func drawMatchPlayerRow(g *ImageGenerator, dc *gg.Context, p MatchPlayer, startX
 		dc.Stroke()
 	}
 
-	// Hero name (left 40% of column)
+	// Hero name
 	g.loadFont(dc, 12)
 	if p.IsMain {
 		dc.SetColor(colorGold)
 	} else {
 		dc.SetColor(colorWhite)
 	}
-	hero := truncateStr(p.HeroName, 14)
-	dc.DrawStringAnchored(hero, startX+8, cy, 0, 0.5)
+	dc.DrawStringAnchored(truncateStr(p.HeroName, 14), startX+8, cy, 0, 0.5)
 
-	// Player name (center)
+	// Player name
 	g.loadFont(dc, 11)
 	dc.SetColor(colorGray)
-	name := truncateStr(p.PlayerName, 12)
-	dc.DrawStringAnchored(name, startX+colW*0.52, cy, 0.5, 0.5)
+	dc.DrawStringAnchored(truncateStr(p.PlayerName, 12), startX+colW*0.52, cy, 0.5, 0.5)
 
-	// Win rate (right)
+	// Win rate
 	g.loadFont(dc, 11)
 	if p.WinRate >= 0 {
 		dc.SetColor(winPctColor(p.WinRate))
@@ -387,6 +442,36 @@ func drawMatchPlayerRow(g *ImageGenerator, dc *gg.Context, p MatchPlayer, startX
 func scaleImage(src image.Image, dstW, dstH int) image.Image {
 	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
 	xdraw.BiLinear.Scale(dst, dst.Bounds(), src, src.Bounds(), xdraw.Over, nil)
+	return dst
+}
+
+// scaleToSquare scales src to fill dstW×dstH preserving aspect ratio (cover crop).
+// Returns an image with Bounds at (0,0) so gg.DrawImage positions it correctly.
+func scaleToSquare(src image.Image, dstW, dstH int) image.Image {
+	srcW := src.Bounds().Dx()
+	srcH := src.Bounds().Dy()
+	scaleX := float64(dstW) / float64(srcW)
+	scaleY := float64(dstH) / float64(srcH)
+	scale := scaleX
+	if scaleY > scaleX {
+		scale = scaleY
+	}
+	newW := int(float64(srcW)*scale + 0.5)
+	newH := int(float64(srcH)*scale + 0.5)
+	if newW < dstW {
+		newW = dstW
+	}
+	if newH < dstH {
+		newH = dstH
+	}
+	// Scale to intermediate size
+	scaled := image.NewRGBA(image.Rect(0, 0, newW, newH))
+	xdraw.BiLinear.Scale(scaled, scaled.Bounds(), src, src.Bounds(), xdraw.Over, nil)
+	// Crop center: copy to a (0,0)-based dst so gg places it correctly
+	offX := (newW - dstW) / 2
+	offY := (newH - dstH) / 2
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	stdraw.Draw(dst, dst.Bounds(), scaled, image.Point{offX, offY}, stdraw.Src)
 	return dst
 }
 

@@ -68,115 +68,73 @@ func (u *Updater) InitChannel() error {
 	return nil
 }
 
-// Refresh recalculates, regenerates PNGs, and edits the 3 Discord messages as file attachments.
-// MinIO upload is optional (archiving); the pinned message uses Discord attachment directly.
+// Refresh recalculates all-time ranking (BASE_YEAR → now), regenerates PNGs,
+// and edits the 3 pinned Discord messages.
 func (u *Updater) Refresh(now time.Time) error {
 	if u.channelID == "" {
 		return nil
 	}
-	weekStart, weekEnd := WeekBounds(now)
-	weekLabel := fmt.Sprintf("Semana: %s → %s",
-		weekStart.Format("Mon Jan 02"),
-		weekEnd.AddDate(0, 0, -1).Format("Mon Jan 02, 2006"))
 
-	year, week := now.ISOWeek()
+	// All-time: from Jan 1 of base year to now
+	allStart := time.Date(u.baseYear, 1, 1, 0, 0, 0, 0, time.UTC)
+	allEnd := now
+	label := fmt.Sprintf("Ranking Total (desde %d)", u.baseYear)
+
+	// Verify there is data
+	rows, _ := u.calc.IndividualRanking(allStart, allEnd)
+	if len(rows) == 0 {
+		logrus.Infof("ranking: no data since %d, skipping refresh", u.baseYear)
+		return nil
+	}
+
+	// Fetch cached avatars from MinIO for each player (best-effort, no download)
+	if u.minio != nil {
+		for i := range rows {
+			key := fmt.Sprintf("assets/avatars/%d.jpg", rows[i].DotaID)
+			if data, err := u.minio.GetCached(context.Background(), key); err == nil {
+				rows[i].AvatarBytes = data
+			}
+		}
+	}
 
 	type imageJob struct {
 		msgType string
 		key     string
 		render  func() ([]byte, error)
 	}
-
+	start, end := allStart, allEnd // capture for closures
 	jobs := []imageJob{
 		{
 			msgType: "individual",
-			key:     fmt.Sprintf("ranking-individual-%d-W%02d.png", year, week),
+			key:     fmt.Sprintf("ranking-individual-total-%d.png", u.baseYear),
 			render: func() ([]byte, error) {
-				rows, err := u.calc.IndividualRanking(weekStart, weekEnd)
+				r, err := u.calc.IndividualRanking(start, end)
 				if err != nil {
 					return nil, err
 				}
-				return u.gen.RenderIndividual(rows, weekLabel)
+				return u.gen.RenderIndividual(r, label)
 			},
 		},
 		{
 			msgType: "team2",
-			key:     fmt.Sprintf("ranking-team2-%d-W%02d.png", year, week),
+			key:     fmt.Sprintf("ranking-team2-total-%d.png", u.baseYear),
 			render: func() ([]byte, error) {
-				rows, err := u.calc.Team2Ranking(weekStart, weekEnd)
+				r, err := u.calc.Team2Ranking(start, end)
 				if err != nil {
 					return nil, err
 				}
-				return u.gen.RenderTeam2(rows, weekLabel)
+				return u.gen.RenderTeam2(r, label)
 			},
 		},
 		{
 			msgType: "team3",
-			key:     fmt.Sprintf("ranking-team3-%d-W%02d.png", year, week),
+			key:     fmt.Sprintf("ranking-team3-total-%d.png", u.baseYear),
 			render: func() ([]byte, error) {
-				rows, err := u.calc.Team3Ranking(weekStart, weekEnd)
+				r, err := u.calc.Team3Ranking(start, end)
 				if err != nil {
 					return nil, err
 				}
-				return u.gen.RenderTeam3(rows, weekLabel)
-			},
-		},
-	}
-
-	// Find nearest week with data (up to 4 weeks back)
-	effectiveStart, effectiveEnd := weekStart, weekEnd
-	effectiveYear, effectiveWeek := year, week
-	for offset := 0; offset <= 4; offset++ {
-		t := now.AddDate(0, 0, -7*offset)
-		ws, we := WeekBounds(t)
-		rows, _ := u.calc.IndividualRanking(ws, we)
-		if len(rows) > 0 {
-			effectiveStart, effectiveEnd = ws, we
-			effectiveYear, effectiveWeek = t.ISOWeek()
-			break
-		}
-		if offset == 4 {
-			logrus.Infof("ranking: no data in last 4 weeks, skipping refresh")
-			return nil
-		}
-	}
-	// Rebuild jobs with effective week bounds
-	weekLabel = fmt.Sprintf("Semana %d-W%02d: %s → %s",
-		effectiveYear, effectiveWeek,
-		effectiveStart.Format("Mon Jan 02"),
-		effectiveEnd.AddDate(0, 0, -1).Format("Mon Jan 02, 2006"))
-	jobs = []imageJob{
-		{
-			msgType: "individual",
-			key:     fmt.Sprintf("ranking-individual-%d-W%02d.png", effectiveYear, effectiveWeek),
-			render: func() ([]byte, error) {
-				rows, err := u.calc.IndividualRanking(effectiveStart, effectiveEnd)
-				if err != nil {
-					return nil, err
-				}
-				return u.gen.RenderIndividual(rows, weekLabel)
-			},
-		},
-		{
-			msgType: "team2",
-			key:     fmt.Sprintf("ranking-team2-%d-W%02d.png", effectiveYear, effectiveWeek),
-			render: func() ([]byte, error) {
-				rows, err := u.calc.Team2Ranking(effectiveStart, effectiveEnd)
-				if err != nil {
-					return nil, err
-				}
-				return u.gen.RenderTeam2(rows, weekLabel)
-			},
-		},
-		{
-			msgType: "team3",
-			key:     fmt.Sprintf("ranking-team3-%d-W%02d.png", effectiveYear, effectiveWeek),
-			render: func() ([]byte, error) {
-				rows, err := u.calc.Team3Ranking(effectiveStart, effectiveEnd)
-				if err != nil {
-					return nil, err
-				}
-				return u.gen.RenderTeam3(rows, weekLabel)
+				return u.gen.RenderTeam3(r, label)
 			},
 		},
 	}
@@ -189,10 +147,9 @@ func (u *Updater) Refresh(now time.Time) error {
 			continue
 		}
 
-		// Upload to MinIO for archiving (optional — skip if not configured)
 		if u.minio != nil {
 			if _, merr := u.minio.Upload(ctx, job.key, imgBytes); merr != nil {
-				logrus.Warnf("ranking: minio upload %s: %v (continuando sin MinIO)", job.msgType, merr)
+				logrus.Warnf("ranking: minio upload %s: %v", job.msgType, merr)
 			}
 		}
 
@@ -202,9 +159,6 @@ func (u *Updater) Refresh(now time.Time) error {
 			continue
 		}
 
-		// Edit pinned message: clear existing attachments + add new PNG
-		// Attachments must be set to empty slice (not nil) to remove old files;
-		// otherwise Discord accumulates them and hits the 10-attachment limit.
 		filename := fmt.Sprintf("ranking-%s.png", job.msgType)
 		emptyStr := ""
 		noAttachments := []*discordgo.MessageAttachment{}
@@ -214,11 +168,7 @@ func (u *Updater) Refresh(now time.Time) error {
 			Content:     &emptyStr,
 			Attachments: &noAttachments,
 			Files: []*discordgo.File{
-				{
-					Name:        filename,
-					ContentType: "image/png",
-					Reader:      bytes.NewReader(imgBytes),
-				},
+				{Name: filename, ContentType: "image/png", Reader: bytes.NewReader(imgBytes)},
 			},
 		})
 		if err != nil {
@@ -226,8 +176,26 @@ func (u *Updater) Refresh(now time.Time) error {
 		}
 	}
 
-	logrus.Infof("ranking: refreshed week %d-W%02d", year, week)
+	logrus.Infof("ranking: refreshed all-time ranking since %d", u.baseYear)
 	return nil
+}
+
+// SendTempRanking sends a ranking PNG to channelID and deletes it after ttl.
+// Used for weekly/monthly on-demand rankings from slash commands.
+func (u *Updater) SendTempRanking(channelID string, imgBytes []byte, filename string, ttl time.Duration) {
+	msg, err := u.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Files: []*discordgo.File{{Name: filename, ContentType: "image/png", Reader: bytes.NewReader(imgBytes)}},
+	})
+	if err != nil {
+		logrus.Warnf("ranking: send temp ranking: %v", err)
+		return
+	}
+	go func() {
+		time.Sleep(ttl)
+		if err := u.session.ChannelMessageDelete(channelID, msg.ID); err != nil {
+			logrus.Warnf("ranking: delete temp ranking msg: %v", err)
+		}
+	}()
 }
 
 // WeekPNG returns the current (or last non-empty) week individual ranking as raw PNG bytes.

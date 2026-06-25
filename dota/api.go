@@ -384,9 +384,33 @@ func (c *Client) GetGameModeName(gameMode int) string {
 
 // GameModeDisplayName convierte el nombre interno (ej. game_mode_all_pick) a display limpio en mayúsculas (ej. ALL PICK)
 func GameModeDisplayName(internalName string) string {
+	// Specific overrides for Dota 2 mode names
+	switch internalName {
+	case "game_mode_all_draft":
+		return "All Pick"
+	case "game_mode_all_pick":
+		return "All Pick"
+	case "game_mode_ranked_matchmaking":
+		return "Ranked All Pick"
+	case "game_mode_captains_mode":
+		return "Captains Mode"
+	case "game_mode_captains_draft":
+		return "Captains Draft"
+	case "game_mode_turbo":
+		return "Turbo"
+	case "game_mode_ability_draft":
+		return "Ability Draft"
+	case "game_mode_event":
+		return "Event"
+	}
 	s := strings.TrimPrefix(internalName, "game_mode_")
-	s = strings.ReplaceAll(s, "_", " ")
-	return strings.ToUpper(s)
+	words := strings.Fields(strings.ReplaceAll(s, "_", " "))
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(w[:1]) + strings.ToLower(w[1:])
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 func (c *Client) GetLobbyTypeName(lobbyType int) string {

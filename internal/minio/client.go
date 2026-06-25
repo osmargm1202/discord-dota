@@ -93,6 +93,24 @@ func (c *Client) GetOrFetchAsset(ctx context.Context, key, sourceURL string) ([]
 	return data, nil
 }
 
+// GetCached returns bytes from MinIO if the key exists, otherwise an error.
+// Unlike GetOrFetchAsset it never makes an outbound HTTP download.
+func (c *Client) GetCached(ctx context.Context, key string) ([]byte, error) {
+	obj, err := c.mc.GetObject(ctx, c.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(obj)
+	obj.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty object")
+	}
+	return data, nil
+}
+
 // CleanOldObjects deletes objects under prefix older than maxAge.
 func (c *Client) CleanOldObjects(ctx context.Context, prefix string, maxAge time.Duration) (int, error) {
 	cutoff := time.Now().Add(-maxAge)

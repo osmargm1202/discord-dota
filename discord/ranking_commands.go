@@ -50,8 +50,7 @@ func (b *Bot) handleRankingSlash(s *discordgo.Session, i *discordgo.InteractionC
 	}
 }
 
-// sendRankingFile genera PNG y lo manda como archivo adjunto directo.
-// No requiere MinIO — funciona en desarrollo local.
+// sendRankingFile genera PNG, lo manda como adjunto y lo borra después de 10 minutos.
 func (b *Bot) sendRankingFile(s *discordgo.Session, i *discordgo.InteractionCreate, renderFn func() ([]byte, string, error)) {
 	imgBytes, label, err := renderFn()
 	if err != nil {
@@ -60,19 +59,28 @@ func (b *Bot) sendRankingFile(s *discordgo.Session, i *discordgo.InteractionCrea
 		return
 	}
 
-	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content: fmt.Sprintf("📊 **%s**", label),
+	msg, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content: fmt.Sprintf("📊 **%s**  *(se eliminará en 10 min)*", label),
 		Files: []*discordgo.File{
-			{
-				Name:        "ranking.png",
-				ContentType: "image/png",
-				Reader:      bytes.NewReader(imgBytes),
-			},
+			{Name: "ranking.png", ContentType: "image/png", Reader: bytes.NewReader(imgBytes)},
 		},
 	})
 	if err != nil {
 		getLogger().Errorf("ranking followup file: %v", err)
+		return
 	}
+
+	// Auto-delete after 10 minutes
+	go func() {
+		time.Sleep(10 * time.Minute)
+		if err := s.ChannelMessageDelete(i.ChannelID, msg.ID); err != nil {
+			getLogger().Warnf("ranking: auto-delete command response: %v", err)
+		}
+		// Also delete the "thinking" interaction response
+		if err := s.InteractionResponseDelete(i.Interaction); err != nil {
+			getLogger().Warnf("ranking: delete interaction response: %v", err)
+		}
+	}()
 }
 
 func (b *Bot) handleAdminRegisterSlash(s *discordgo.Session, i *discordgo.InteractionCreate, subcommand *discordgo.ApplicationCommandInteractionDataOption) {

@@ -43,6 +43,7 @@ type PlayerRankRow struct {
 	Net         int
 	WinPct      float64
 	MMRTotal    int
+	AvatarBytes []byte // optional: PNG/JPEG avatar image
 }
 
 // Team2Row holds ranking data for a 2-player combo.

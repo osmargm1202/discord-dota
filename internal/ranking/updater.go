@@ -150,31 +150,65 @@ func (u *Updater) Refresh(now time.Time) error {
 	return nil
 }
 
-// OnDemandMonth generates an embed image for a specific month.
-func (u *Updater) OnDemandMonth(year, month int) (*discordgo.MessageEmbed, error) {
+// WeekPNG returns the current week individual ranking as raw PNG bytes (no MinIO needed).
+func (u *Updater) WeekPNG() ([]byte, string, error) {
+	weekStart, weekEnd := WeekBounds(time.Now())
+	label := fmt.Sprintf("Semana: %s → %s",
+		weekStart.Format("Mon Jan 02"),
+		weekEnd.AddDate(0, 0, -1).Format("Mon Jan 02, 2006"))
+	players, err := u.calc.IndividualRanking(weekStart, weekEnd)
+	if err != nil {
+		return nil, label, err
+	}
+	img, err := u.gen.RenderIndividual(players, label)
+	return img, label, err
+}
+
+// MonthPNG returns a monthly individual ranking as raw PNG bytes (no MinIO needed).
+func (u *Updater) MonthPNG(year, month int) ([]byte, string, error) {
 	start, end := MonthBounds(year, month)
 	label := fmt.Sprintf("Mes: %s %d", time.Month(month).String(), year)
-	return u.renderOnDemand(start, end, label)
-}
-
-// OnDemandLastN generates an embed image for the full year (last N not time-bounded — shows year stats).
-func (u *Updater) OnDemandLastN(baseYear int) (*discordgo.MessageEmbed, error) {
-	start, end := YearBounds(baseYear)
-	label := fmt.Sprintf("Año %d (completo)", baseYear)
-	return u.renderOnDemand(start, end, label)
-}
-
-func (u *Updater) renderOnDemand(start, end time.Time, label string) (*discordgo.MessageEmbed, error) {
-	if u.minio == nil {
-		return nil, fmt.Errorf("MinIO no configurado")
-	}
 	players, err := u.calc.IndividualRanking(start, end)
 	if err != nil {
-		return nil, err
+		return nil, label, err
 	}
-	imgBytes, err := u.gen.RenderIndividual(players, label)
+	img, err := u.gen.RenderIndividual(players, label)
+	return img, label, err
+}
+
+// YearPNG returns the full year individual ranking as raw PNG bytes (no MinIO needed).
+func (u *Updater) YearPNG(baseYear int) ([]byte, string, error) {
+	start, end := YearBounds(baseYear)
+	label := fmt.Sprintf("Año %d (completo)", baseYear)
+	players, err := u.calc.IndividualRanking(start, end)
+	if err != nil {
+		return nil, label, err
+	}
+	img, err := u.gen.RenderIndividual(players, label)
+	return img, label, err
+}
+
+// OnDemandMonth generates an embed via MinIO for a specific month (used by pinned channel).
+func (u *Updater) OnDemandMonth(year, month int) (*discordgo.MessageEmbed, error) {
+	img, label, err := u.MonthPNG(year, month)
 	if err != nil {
 		return nil, err
+	}
+	return u.uploadEmbed(img, label)
+}
+
+// OnDemandLastN generates an embed via MinIO for the full year (used by pinned channel).
+func (u *Updater) OnDemandLastN(baseYear int) (*discordgo.MessageEmbed, error) {
+	img, label, err := u.YearPNG(baseYear)
+	if err != nil {
+		return nil, err
+	}
+	return u.uploadEmbed(img, label)
+}
+
+func (u *Updater) uploadEmbed(imgBytes []byte, label string) (*discordgo.MessageEmbed, error) {
+	if u.minio == nil {
+		return nil, fmt.Errorf("MinIO no configurado")
 	}
 	key := fmt.Sprintf("ranking-ondemand-%d.png", time.Now().UnixMilli())
 	imgURL, err := u.minio.Upload(context.Background(), key, imgBytes)
@@ -182,7 +216,8 @@ func (u *Updater) renderOnDemand(start, end time.Time, label string) (*discordgo
 		return nil, err
 	}
 	return &discordgo.MessageEmbed{
-		Image: &discordgo.MessageEmbedImage{URL: imgURL},
-		Color: 0xC8AA6E,
+		Description: label,
+		Image:       &discordgo.MessageEmbedImage{URL: imgURL},
+		Color:       0xC8AA6E,
 	}, nil
 }

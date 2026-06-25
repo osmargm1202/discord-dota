@@ -291,7 +291,7 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 		b.handleStatsSlash(s, i)
 	case "help":
 		b.handleHelpSlash(s, i)
-	case "ranking":
+	case "ranking", "rankings":
 		b.handleRankingSlash(s, i, subcommand)
 	case "admin":
 		if len(subcommand.Options) > 0 {

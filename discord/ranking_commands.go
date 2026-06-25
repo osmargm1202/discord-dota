@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"time"
@@ -16,16 +17,15 @@ var monthMap = map[string]int{
 
 func (b *Bot) handleRankingSlash(s *discordgo.Session, i *discordgo.InteractionCreate, subcommand *discordgo.ApplicationCommandInteractionDataOption) {
 	if b.rankingUpdater == nil {
-		b.sendFollowup(s, i, "❌ Sistema de ranking no configurado (requiere POSTGRES_DSN y MINIO_ENDPOINT).")
+		b.sendFollowup(s, i, "❌ Sistema de ranking no configurado (requiere POSTGRES_DSN).")
 		return
 	}
 
+	// Sin opciones → semana actual como archivo PNG adjunto (sin MinIO, funciona local)
 	if len(subcommand.Options) == 0 {
-		if b.config.RankingChannelID != "" {
-			b.sendFollowup(s, i, fmt.Sprintf("📊 Canal de ranking: <#%s>", b.config.RankingChannelID))
-		} else {
-			b.sendFollowup(s, i, "❌ RANKING_CHANNEL_ID no configurado.")
-		}
+		b.sendRankingFile(s, i, func() ([]byte, string, error) {
+			return b.rankingUpdater.WeekPNG()
+		})
 		return
 	}
 
@@ -39,23 +39,39 @@ func (b *Bot) handleRankingSlash(s *discordgo.Session, i *discordgo.InteractionC
 			return
 		}
 		year := time.Now().Year()
-		embed, err := b.rankingUpdater.OnDemandMonth(year, monthNum)
-		if err != nil {
-			getLogger().Errorf("ranking mes %s: %v", mesStr, err)
-			b.sendFollowup(s, i, fmt.Sprintf("❌ Error generando ranking: %v", err))
-			return
-		}
-		b.sendFollowupEmbed(s, i, embed)
+		b.sendRankingFile(s, i, func() ([]byte, string, error) {
+			return b.rankingUpdater.MonthPNG(year, monthNum)
+		})
 
 	case "ultimas":
-		b.sendFollowup(s, i, "📊 Mostrando ranking del año completo...")
-		embed, err := b.rankingUpdater.OnDemandLastN(b.config.BaseYear)
-		if err != nil {
-			getLogger().Errorf("ranking ultimas: %v", err)
-			b.sendFollowup(s, i, fmt.Sprintf("❌ Error generando ranking: %v", err))
-			return
-		}
-		b.sendFollowupEmbed(s, i, embed)
+		b.sendRankingFile(s, i, func() ([]byte, string, error) {
+			return b.rankingUpdater.YearPNG(b.config.BaseYear)
+		})
+	}
+}
+
+// sendRankingFile genera PNG y lo manda como archivo adjunto directo.
+// No requiere MinIO — funciona en desarrollo local.
+func (b *Bot) sendRankingFile(s *discordgo.Session, i *discordgo.InteractionCreate, renderFn func() ([]byte, string, error)) {
+	imgBytes, label, err := renderFn()
+	if err != nil {
+		getLogger().Errorf("ranking render: %v", err)
+		b.sendFollowup(s, i, fmt.Sprintf("❌ Error generando imagen: %v", err))
+		return
+	}
+
+	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content: fmt.Sprintf("📊 **%s**", label),
+		Files: []*discordgo.File{
+			{
+				Name:        "ranking.png",
+				ContentType: "image/png",
+				Reader:      bytes.NewReader(imgBytes),
+			},
+		},
+	})
+	if err != nil {
+		getLogger().Errorf("ranking followup file: %v", err)
 	}
 }
 
@@ -88,7 +104,6 @@ func (b *Bot) handleAdminRegisterSlash(s *discordgo.Session, i *discordgo.Intera
 
 	displayName := nombre
 	if displayName == "" {
-		// Try to fetch name from Stratz
 		profile, err := b.stratzClient.GetPlayerProfile(dotaID)
 		if err == nil && profile != nil {
 			displayName = profile.Name
@@ -103,14 +118,12 @@ func (b *Bot) handleAdminRegisterSlash(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	b.sendFollowup(s, i, fmt.Sprintf("✅ Jugador **%s** (Dota ID: %d) agregado al ranking (sin Discord vinculado).", displayName, dotaID))
+	b.sendFollowup(s, i, fmt.Sprintf("✅ Jugador **%s** (Dota ID: %d) agregado al ranking.", displayName, dotaID))
 	getLogger().Infof("admin register: dota_id=%d display_name=%s", dotaID, displayName)
 
-	// Trigger backfill for the new user in background
 	if b.backfillSvc != nil {
 		go b.backfillSvc.RunForUser(dotaID)
 	}
-	// Refresh ranking
 	if b.rankingUpdater != nil {
 		go func() {
 			if err := b.rankingUpdater.Refresh(time.Now()); err != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -51,4 +52,22 @@ func (c *Client) Upload(ctx context.Context, key string, data []byte) (string, e
 		return "", fmt.Errorf("put object %s: %w", key, err)
 	}
 	return fmt.Sprintf("%s/%s/%s", c.publicURL, c.bucket, key), nil
+}
+
+// CleanOldObjects deletes objects under prefix older than maxAge.
+func (c *Client) CleanOldObjects(ctx context.Context, prefix string, maxAge time.Duration) (int, error) {
+	cutoff := time.Now().Add(-maxAge)
+	deleted := 0
+	for obj := range c.mc.ListObjects(ctx, c.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if obj.Err != nil {
+			return deleted, fmt.Errorf("list objects: %w", obj.Err)
+		}
+		if obj.LastModified.Before(cutoff) {
+			if err := c.mc.RemoveObject(ctx, c.bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
+				return deleted, fmt.Errorf("remove %s: %w", obj.Key, err)
+			}
+			deleted++
+		}
+	}
+	return deleted, nil
 }

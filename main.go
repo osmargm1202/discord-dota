@@ -9,6 +9,7 @@ import (
 	minioclient "dota-discord-bot/internal/minio"
 	"dota-discord-bot/internal/ranking"
 	"dota-discord-bot/storage"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -91,6 +92,19 @@ func main() {
 			logrus.Warnf("MinIO no disponible: %v", err)
 		} else {
 			logrus.Info("MinIO conectado")
+			// Daily cleanup: delete match notification images older than 30 days
+			go func() {
+				ticker := time.NewTicker(24 * time.Hour)
+				defer ticker.Stop()
+				for range ticker.C {
+					n, cerr := minioClient.CleanOldObjects(context.Background(), "match-notifications/", 30*24*time.Hour)
+					if cerr != nil {
+						logrus.Warnf("minio cleanup: %v", cerr)
+					} else if n > 0 {
+						logrus.Infof("minio cleanup: eliminadas %d imágenes antiguas", n)
+					}
+				}
+			}()
 		}
 	}
 

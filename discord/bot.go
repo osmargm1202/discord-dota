@@ -1,6 +1,8 @@
 package discord
 
 import (
+	"bytes"
+	"context"
 	"dota-discord-bot/config"
 	"dota-discord-bot/dota"
 	dbpkg "dota-discord-bot/internal/db"
@@ -1717,20 +1719,103 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		})
 	}
 
-	// Agregar racha en el footer (desde Stratz)
+	// Streak from Stratz
+	streakText := ""
 	if len(recentStratzMatches) > 0 {
 		accountIDInt, _ := strconv.ParseInt(accountID, 10, 64)
 		streak := dota.AnalyzeStreakFromStratzMatches(recentStratzMatches, accountIDInt)
-		embed.Footer.Text = fmt.Sprintf("%s | Match ID: %d", streak.CurrentStreak, match.MatchID)
+		streakText = streak.CurrentStreak
+		embed.Footer.Text = fmt.Sprintf("%s | Match ID: %d", streakText, match.MatchID)
 	}
 
-	_, err := b.session.ChannelMessageSendEmbed(channelID, embed)
-	if err == nil && b.rankingUpdater != nil {
+	// Lane/Rol string for PNG
+	laneInfo := player.Lane
+	if player.Role != "" {
+		if laneInfo != "" {
+			laneInfo += " / " + player.Role
+		} else {
+			laneInfo = player.Role
+		}
+	}
+	rankBracket := ""
+	if profile != nil {
+		rankBracket = profile.RankBracket
+	}
+
+	stratzURL := fmt.Sprintf("https://stratz.com/matches/%d", match.MatchID)
+	var sendErr error
+
+	// Try PNG path when DB is available (new mode)
+	if b.db != nil {
+		matchData := ranking.MatchRenderData{
+			PlayerName:      personaname,
+			HeroName:        heroName,
+			GameMode:        gameModeDisplayName,
+			RankBracket:     rankBracket,
+			IsWin:           isWin,
+			KDA:             fmt.Sprintf("%d/%d/%d (%.2f KDA)", player.Kills, player.Deaths, player.Assists, player.KDA),
+			Duration:        dota.FormatDuration(match.Duration),
+			Level:           player.Level,
+			RadiantScore:    match.RadiantScore,
+			DireScore:       match.DireScore,
+			GPM:             player.GoldPerMin,
+			XPM:             player.XpPerMin,
+			IMP:             formatIMP(player.Imp),
+			HeroRecord:      heroRecordText,
+			LaneInfo:        laneInfo,
+			LaneOutcome:     laneSummary,
+			HeroDamage:      player.HeroDamage,
+			TowerDamage:     player.TowerDamage,
+			HeroHealing:     player.HeroHealing,
+			Streak:          streakText,
+			MatchID:         match.MatchID,
+			AnalysisOutcome: formatAnalysisOutcome(match.AnalysisOutcome),
+			UpdatedAt:       time.Now(),
+		}
+		gen := ranking.NewImageGenerator()
+		imgBytes, renderErr := gen.RenderMatch(matchData)
+		if renderErr != nil {
+			getLogger().Errorf("render match PNG %d: %v", match.MatchID, renderErr)
+			// fallback to text embed
+			_, sendErr = b.session.ChannelMessageSendEmbed(channelID, embed)
+		} else if b.minioClient != nil {
+			// Prod: upload to MinIO, send URL embed + Stratz link
+			key := fmt.Sprintf("match-notifications/match-%d-%s.png", match.MatchID, accountID)
+			imgURL, upErr := b.minioClient.Upload(context.Background(), key, imgBytes)
+			if upErr != nil {
+				getLogger().Warnf("upload match PNG: %v — sending as attachment", upErr)
+				_, sendErr = b.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+					Content: stratzURL,
+					Files:   []*discordgo.File{{Name: "partida.png", ContentType: "image/png", Reader: bytes.NewReader(imgBytes)}},
+				})
+			} else {
+				_, sendErr = b.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+					Content: stratzURL,
+					Embeds: []*discordgo.MessageEmbed{{
+						Image: &discordgo.MessageEmbedImage{URL: imgURL},
+						Color: resultColor,
+						URL:   stratzURL,
+					}},
+				})
+			}
+		} else {
+			// Dev: file attachment + Stratz link
+			_, sendErr = b.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+				Content: stratzURL,
+				Files:   []*discordgo.File{{Name: "partida.png", ContentType: "image/png", Reader: bytes.NewReader(imgBytes)}},
+			})
+		}
+	} else {
+		// No DB — legacy text embed
+		_, sendErr = b.session.ChannelMessageSendEmbed(channelID, embed)
+	}
+
+	if sendErr == nil && b.rankingUpdater != nil {
 		go func() {
 			if rerr := b.rankingUpdater.Refresh(time.Now()); rerr != nil {
 				getLogger().Errorf("ranking refresh after match: %v", rerr)
 			}
 		}()
 	}
-	return err
+	return sendErr
 }

@@ -1184,6 +1184,11 @@ func (b *Bot) CheckForNewMatches() error {
 			continue
 		}
 
+		// Save new match to PostgreSQL so ranking reflects it
+		if b.db != nil && !alreadyProcessed {
+			b.storeNewMatchToDB(matchDetailsStratz, playerStratz, accountIDInt)
+		}
+
 		// Don't overwrite last match ID if this was just a catch-up display (already processed)
 		if !alreadyProcessed {
 			if err := b.userStore.SetLastMatch(discordID, latestStratzMatch.ID); err != nil {
@@ -1195,6 +1200,48 @@ func (b *Bot) CheckForNewMatches() error {
 	}
 
 	return nil
+}
+
+// storeNewMatchToDB persists a freshly-detected match to PostgreSQL so the ranking reflects it.
+func (b *Bot) storeNewMatchToDB(m *dota.StratzMatch, p *dota.StratzPlayer, dotaID int64) {
+	if m == nil || p == nil {
+		return
+	}
+	startTime := time.Unix(m.StartDateTime, 0).UTC()
+	if err := b.db.UpsertMatch(m.ID, startTime, m.DurationSeconds, int(m.GameMode), m.DidRadiantWin, false); err != nil {
+		getLogger().Warnf("storeNewMatch: upsert match %d: %v", m.ID, err)
+		return
+	}
+	won := (m.DidRadiantWin && p.IsRadiant) || (!m.DidRadiantWin && !p.IsRadiant)
+	mmrDelta := -25
+	if won {
+		mmrDelta = 25
+	}
+	if err := b.db.UpsertPlayerMatch(dbpkg.PlayerMatchRow{
+		MatchID:     m.ID,
+		DotaID:      dotaID,
+		IsRadiant:   p.IsRadiant,
+		HeroID:      p.HeroID,
+		Kills:       p.Kills,
+		Deaths:      p.Deaths,
+		Assists:     p.Assists,
+		Level:       p.Level,
+		GPM:         p.GoldPerMinute,
+		XPM:         p.ExperiencePerMinute,
+		HeroDamage:  p.HeroDamage,
+		TowerDamage: p.TowerDamage,
+		Healing:     p.HeroHealing,
+		Imp:         p.Imp,
+		Award:       p.Award,
+		Lane:        p.Lane,
+		Role:        p.Role,
+		Won:         won,
+		MMRDelta:    mmrDelta,
+	}); err != nil {
+		getLogger().Warnf("storeNewMatch: upsert player_match %d/%d: %v", m.ID, dotaID, err)
+	} else {
+		getLogger().Infof("storeNewMatch: saved match %d for dota_id=%d", m.ID, dotaID)
+	}
 }
 
 // RunStatsScheduler ejecuta en bucle y, a la hora STATS_TIME (HH:MM), envía stats de todos los registrados al canal de notificaciones.

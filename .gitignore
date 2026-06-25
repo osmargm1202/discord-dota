@@ -4,6 +4,8 @@
 # Directorios de datos y logs
 data/
 logs/
+postgres-data/
+minio-data/
 
 # Imágenes de héroes descargadas (regenerar con make download-hero-images)
 dota/miniaturas/*.png

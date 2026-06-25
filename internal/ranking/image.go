@@ -125,11 +125,12 @@ type colDef struct {
 var indivCols = []colDef{
 	{"#", 22, 0.5},
 	{"JUGADOR", 70, 0},
-	{"G", 460, 0.5},
-	{"P", 510, 0.5},
-	{"WIN%", 565, 0.5},
-	{"+/-", 625, 0.5},
-	{"~MMR", 705, 0.5},
+	{"T", 390, 0.5},
+	{"G", 435, 0.5},
+	{"P", 478, 0.5},
+	{"WIN%", 533, 0.5},
+	{"+/-", 595, 0.5},
+	{"~MMR", 678, 0.5},
 }
 
 var teamCols = []colDef{
@@ -169,7 +170,7 @@ func (g *ImageGenerator) drawIndivRow(dc *gg.Context, y float64, idx int, r Play
 	dc.SetColor(colorGray)
 	dc.DrawStringAnchored(rankStr, 22, y+rowH/2, 0.5, 0.5)
 
-	// avatar placeholder circle
+	// avatar circle with initials
 	dc.SetColor(colorPanel)
 	dc.DrawCircle(56, y+rowH/2, 18)
 	dc.Fill()
@@ -177,6 +178,15 @@ func (g *ImageGenerator) drawIndivRow(dc *gg.Context, y float64, idx int, r Play
 	dc.SetLineWidth(1)
 	dc.DrawCircle(56, y+rowH/2, 18)
 	dc.Stroke()
+	// draw first letter of display name
+	initial := "?"
+	if len(r.DisplayName) > 0 {
+		runes := []rune(r.DisplayName)
+		initial = string(runes[0])
+	}
+	g.loadFont(dc, 14)
+	dc.SetColor(colorGold)
+	dc.DrawStringAnchored(initial, 56, y+rowH/2, 0.5, 0.5)
 
 	// player name
 	g.loadFont(dc, 13)
@@ -184,16 +194,19 @@ func (g *ImageGenerator) drawIndivRow(dc *gg.Context, y float64, idx int, r Play
 	dc.DrawStringAnchored(r.DisplayName, 82, y+rowH/2, 0, 0.5)
 
 	// stats
+	total := r.Wins + r.Losses
+	dc.SetColor(colorGray)
+	dc.DrawStringAnchored(fmt.Sprintf("%d", total), 390, y+rowH/2, 0.5, 0.5)
 	dc.SetColor(colorGreen)
-	dc.DrawStringAnchored(fmt.Sprintf("%d", r.Wins), 460, y+rowH/2, 0.5, 0.5)
+	dc.DrawStringAnchored(fmt.Sprintf("%d", r.Wins), 435, y+rowH/2, 0.5, 0.5)
 	dc.SetColor(colorRed)
-	dc.DrawStringAnchored(fmt.Sprintf("%d", r.Losses), 510, y+rowH/2, 0.5, 0.5)
+	dc.DrawStringAnchored(fmt.Sprintf("%d", r.Losses), 478, y+rowH/2, 0.5, 0.5)
 	dc.SetColor(winPctColor(r.WinPct))
-	dc.DrawStringAnchored(fmt.Sprintf("%.0f%%", r.WinPct), 565, y+rowH/2, 0.5, 0.5)
+	dc.DrawStringAnchored(fmt.Sprintf("%.0f%%", r.WinPct), 533, y+rowH/2, 0.5, 0.5)
 	dc.SetColor(signColor(r.Net))
-	dc.DrawStringAnchored(signStr(r.Net), 625, y+rowH/2, 0.5, 0.5)
+	dc.DrawStringAnchored(signStr(r.Net), 595, y+rowH/2, 0.5, 0.5)
 	dc.SetColor(signColor(r.MMRTotal))
-	dc.DrawStringAnchored("~"+signStr(r.MMRTotal), 705, y+rowH/2, 0.5, 0.5)
+	dc.DrawStringAnchored("~"+signStr(r.MMRTotal), 678, y+rowH/2, 0.5, 0.5)
 }
 
 func (g *ImageGenerator) drawTeam2Row(dc *gg.Context, y float64, idx int, r Team2Row) {

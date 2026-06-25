@@ -42,6 +42,7 @@ func (s *Service) Run() {
 		if err := s.backfillUser(u.DotaID, afterUnix); err != nil {
 			logrus.Errorf("backfill: dota_id %d: %v", u.DotaID, err)
 		}
+		s.updateDisplayName(u.DotaID)
 	}
 	logrus.Info("backfill: complete")
 }
@@ -52,6 +53,21 @@ func (s *Service) RunForUser(dotaID int64) {
 	logrus.Infof("backfill: running for new user dota_id %d", dotaID)
 	if err := s.backfillUser(dotaID, afterUnix); err != nil {
 		logrus.Errorf("backfill: dota_id %d: %v", dotaID, err)
+	}
+	s.updateDisplayName(dotaID)
+}
+
+// updateDisplayName fetches name from Stratz and updates the DB if still default.
+func (s *Service) updateDisplayName(dotaID int64) {
+	profile, err := s.stratz.GetPlayerProfile(dotaID)
+	if err != nil || profile == nil || profile.Name == "" {
+		return
+	}
+	name := profile.Name
+	if err := s.db.UpsertUser(nil, dotaID, &name); err != nil {
+		logrus.Warnf("backfill: update display_name dota_id %d: %v", dotaID, err)
+	} else {
+		logrus.Infof("backfill: updated display_name dota_id %d → %s", dotaID, name)
 	}
 }
 

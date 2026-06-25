@@ -23,9 +23,9 @@
           #   2. Corre: nix build .#
           #   3. El error te da: got: sha256-XXXX
           #   4. Reemplaza lib.fakeHash con "sha256-XXXX"
-          vendorHash = lib.fakeHash;
+          vendorHash = "sha256-JYpN2MA3jeqe8WqXKIDbvFWrWRN5tD2Db3cKhXI0edo=";
 
-          CGO_ENABLED = 0;
+          env.CGO_ENABLED = "0";
           ldflags = [ "-s" "-w" ];
 
           # Excluir archivos de test y docs del build context

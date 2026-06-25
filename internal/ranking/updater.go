@@ -202,13 +202,17 @@ func (u *Updater) Refresh(now time.Time) error {
 			continue
 		}
 
-		// Edit pinned message with file attachment — works without public MinIO URL
+		// Edit pinned message: clear existing attachments + add new PNG
+		// Attachments must be set to empty slice (not nil) to remove old files;
+		// otherwise Discord accumulates them and hits the 10-attachment limit.
 		filename := fmt.Sprintf("ranking-%s.png", job.msgType)
 		emptyStr := ""
+		noAttachments := []*discordgo.MessageAttachment{}
 		_, err = u.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
-			ID:      msgID,
-			Channel: u.channelID,
-			Content: &emptyStr,
+			ID:          msgID,
+			Channel:     u.channelID,
+			Content:     &emptyStr,
+			Attachments: &noAttachments,
 			Files: []*discordgo.File{
 				{
 					Name:        filename,

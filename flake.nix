@@ -32,9 +32,19 @@
           excludedPackages = [ "cmd" ];
         };
 
-        # Shell de desarrollo
+        # Shell de desarrollo — incluye todo para correr pruebas locales sin Docker
         devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [ go_1_25 postgresql_16 minio ];
+          buildInputs = with pkgs; [
+            go_1_25
+            postgresql_16   # postgres, initdb, pg_isready, createdb
+            minio           # minio server
+            curl            # para verificar MinIO
+          ];
+          shellHook = ''
+            echo "Dev shell listo. Para probar sin Docker:"
+            echo "  nix build .#"
+            echo "  ./nix/run-local-test.sh"
+          '';
         };
       }
     ) // {

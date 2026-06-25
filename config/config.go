@@ -11,27 +11,37 @@ import (
 type Config struct {
 	DiscordToken          string
 	NotificationChannelID string
+	RankingChannelID      string
 	ServerID              string
 	StratzToken           string
 	Debug                 bool
-	RefreshRateMinutes    int    // intervalo en minutos para verificar nuevas partidas (>= 1, <= 60)
-	RequireParsed         bool   // si true, solo notificar cuando la partida esté parseada (parsedDateTime > 0); si false, notificar cualquier partida nueva
-	StatsMinGames         int    // mínimo de partidas por héroe para /dota stats (>= 2)
-	StatsTime             string // hora militar (HH:MM) para envío diario de stats; vacío = desactivado
-	StatsTake             int    // partidas analizadas para stats (0-100; 0 = 100)
+	RefreshRateMinutes    int
+	RequireParsed         bool
+	StatsMinGames         int
+	StatsTime             string
+	StatsTake             int
+	// PostgreSQL
+	PostgresDSN string
+	// MinIO
+	MinioEndpoint  string
+	MinioAccessKey string
+	MinioSecretKey string
+	MinioBucket    string
+	MinioPublicURL string
+	// Backfill
+	BaseYear        int
+	BackfillDelayMS int
 }
 
 func Load() (*Config, error) {
-	// Cargar .env si existe
 	if err := godotenv.Load(); err != nil {
-		// No es crítico si no existe el archivo
+		// not critical
 	}
 
 	discordToken := os.Getenv("DISCORD_TOKEN")
 	if discordToken == "" {
 		return nil, fmt.Errorf("DISCORD_TOKEN no está configurado en .env")
 	}
-
 	notificationChannelID := os.Getenv("NOTIFICATION_CHANNEL_ID")
 	if notificationChannelID == "" {
 		return nil, fmt.Errorf("NOTIFICATION_CHANNEL_ID no está configurado en .env")
@@ -42,20 +52,19 @@ func Load() (*Config, error) {
 	}
 	stratzToken := os.Getenv("STRATZ_TOKEN")
 	if stratzToken == "" {
-		return nil, fmt.Errorf("STRATZ_TOKEN no está configurado en .env")
+		return nil, fmt.Errorf("STRATZ_TOKEN es obligatorio")
 	}
 
 	debug := os.Getenv("DEBUG") == "true"
-
-	requireParsed := os.Getenv("PARSED") != "false" // true por defecto; solo "false" desactiva la verificación
+	requireParsed := os.Getenv("PARSED") != "false"
 
 	refreshRateMinutes := 1
 	if s := os.Getenv("REFRESH_RATE"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n >= 1 {
-			refreshRateMinutes = n
-			if refreshRateMinutes > 60 {
-				refreshRateMinutes = 60
+			if n > 60 {
+				n = 60
 			}
+			refreshRateMinutes = n
 		}
 	}
 
@@ -66,14 +75,10 @@ func Load() (*Config, error) {
 		}
 	}
 
-	statsTime := os.Getenv("STATS_TIME") // HH:MM, ej. "20:00"; vacío = no envío automático
-
 	statsTake := 100
 	if s := os.Getenv("STATS_TAKE"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil {
-			if n <= 0 {
-				statsTake = 100
-			} else if n > 100 {
+			if n <= 0 || n > 100 {
 				statsTake = 100
 			} else {
 				statsTake = n
@@ -81,16 +86,46 @@ func Load() (*Config, error) {
 		}
 	}
 
+	baseYear := 2026
+	if s := os.Getenv("BASE_YEAR"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 2020 {
+			baseYear = n
+		}
+	}
+
+	backfillDelayMS := 700
+	if s := os.Getenv("BACKFILL_DELAY_MS"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 100 {
+			backfillDelayMS = n
+		}
+	}
+
 	return &Config{
 		DiscordToken:          discordToken,
 		NotificationChannelID: notificationChannelID,
+		RankingChannelID:      os.Getenv("RANKING_CHANNEL_ID"),
 		ServerID:              serverID,
 		StratzToken:           stratzToken,
 		Debug:                 debug,
 		RefreshRateMinutes:    refreshRateMinutes,
 		RequireParsed:         requireParsed,
 		StatsMinGames:         statsMinGames,
-		StatsTime:             statsTime,
+		StatsTime:             os.Getenv("STATS_TIME"),
 		StatsTake:             statsTake,
+		PostgresDSN:           os.Getenv("POSTGRES_DSN"),
+		MinioEndpoint:         os.Getenv("MINIO_ENDPOINT"),
+		MinioAccessKey:        os.Getenv("MINIO_ACCESS_KEY"),
+		MinioSecretKey:        os.Getenv("MINIO_SECRET_KEY"),
+		MinioBucket:           envOrDefault("MINIO_BUCKET", "dota-rankings"),
+		MinioPublicURL:        os.Getenv("MINIO_PUBLIC_URL"),
+		BaseYear:              baseYear,
+		BackfillDelayMS:       backfillDelayMS,
 	}, nil
+}
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

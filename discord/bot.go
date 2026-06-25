@@ -3,6 +3,10 @@ package discord
 import (
 	"dota-discord-bot/config"
 	"dota-discord-bot/dota"
+	dbpkg "dota-discord-bot/internal/db"
+	minioclient "dota-discord-bot/internal/minio"
+	"dota-discord-bot/internal/ranking"
+	"dota-discord-bot/internal/backfill"
 	"dota-discord-bot/storage"
 	"errors"
 	"fmt"
@@ -16,17 +20,21 @@ import (
 )
 
 type Bot struct {
-	session      *discordgo.Session
-	dotaClient   *dota.Client
-	stratzClient *dota.StratzClient
-	userStore    *storage.UserStore
-	config       *config.Config
-	searchCache  map[string][]dota.SearchResponse // Cache temporal de búsquedas por usuario
-	lastStatsDay string                           // fecha (2006-01-02) del último envío diario de stats
-	statsMu      sync.Mutex                       // protege lastStatsDay
+	session        *discordgo.Session
+	dotaClient     *dota.Client
+	stratzClient   *dota.StratzClient
+	userStore      *storage.UserStore
+	config         *config.Config
+	searchCache    map[string][]dota.SearchResponse
+	lastStatsDay   string
+	statsMu        sync.Mutex
+	db             *dbpkg.DB
+	minioClient    *minioclient.Client
+	rankingUpdater *ranking.Updater
+	backfillSvc    *backfill.Service
 }
 
-func NewBot(cfg *config.Config, dotaClient *dota.Client, stratzClient *dota.StratzClient, userStore *storage.UserStore) (*Bot, error) {
+func NewBot(cfg *config.Config, dotaClient *dota.Client, stratzClient *dota.StratzClient, userStore *storage.UserStore, database *dbpkg.DB, minioClient *minioclient.Client) (*Bot, error) {
 	if err := InitLogger(cfg.Debug); err != nil {
 		return nil, fmt.Errorf("error inicializando logger: %w", err)
 	}
@@ -43,6 +51,8 @@ func NewBot(cfg *config.Config, dotaClient *dota.Client, stratzClient *dota.Stra
 		userStore:    userStore,
 		config:       cfg,
 		searchCache:  make(map[string][]dota.SearchResponse),
+		db:           database,
+		minioClient:  minioClient,
 	}
 
 	// Cambiar a interactionCreate para manejar slash commands
@@ -157,6 +167,51 @@ func (b *Bot) registerCommands() error {
 					Name:        "help",
 					Description: "Mostrar ayuda",
 				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "ranking",
+					Description: "Ver tabla de ranking semanal",
+					Options: []*discordgo.ApplicationCommandOption{
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "mes",
+							Description: "Mes a consultar (enero, febrero, ...)",
+							Required:    false,
+						},
+						{
+							Type:        discordgo.ApplicationCommandOptionInteger,
+							Name:        "ultimas",
+							Description: "Últimas N partidas del año (10, 100)",
+							Required:    false,
+						},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommandGroup,
+					Name:        "admin",
+					Description: "Comandos de administración",
+					Options: []*discordgo.ApplicationCommandOption{
+						{
+							Type:        discordgo.ApplicationCommandOptionSubCommand,
+							Name:        "register",
+							Description: "Registrar jugador solo en ranking (sin Discord ID)",
+							Options: []*discordgo.ApplicationCommandOption{
+								{
+									Type:        discordgo.ApplicationCommandOptionString,
+									Name:        "account_id",
+									Description: "Dota 2 Account ID",
+									Required:    true,
+								},
+								{
+									Type:        discordgo.ApplicationCommandOptionString,
+									Name:        "nombre",
+									Description: "Nombre a mostrar en el ranking",
+									Required:    false,
+								},
+							},
+						},
+					},
+				},
 			},
 		},
 	}
@@ -172,6 +227,15 @@ func (b *Bot) registerCommands() error {
 
 	return nil
 }
+
+// Session returns the underlying Discord session (used by ranking updater).
+func (b *Bot) Session() *discordgo.Session { return b.session }
+
+// SetRankingUpdater sets the ranking updater after bot creation.
+func (b *Bot) SetRankingUpdater(u *ranking.Updater) { b.rankingUpdater = u }
+
+// SetBackfillService stores the backfill service so commands can trigger it.
+func (b *Bot) SetBackfillService(s *backfill.Service) { b.backfillSvc = s }
 
 func (b *Bot) Stop() {
 	getLogger().Info("Cerrando bot...")
@@ -227,6 +291,17 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 		b.handleStatsSlash(s, i)
 	case "help":
 		b.handleHelpSlash(s, i)
+	case "ranking":
+		b.handleRankingSlash(s, i, subcommand)
+	case "admin":
+		if len(subcommand.Options) > 0 {
+			switch subcommand.Options[0].Name {
+			case "register":
+				b.handleAdminRegisterSlash(s, i, subcommand.Options[0])
+			default:
+				b.sendFollowup(s, i, "❌ Subcomando admin no reconocido.")
+			}
+		}
 	default:
 		b.sendFollowup(s, i, "❌ Comando no reconocido. Usa `/dota help` para ver los comandos disponibles.")
 	}
@@ -1637,5 +1712,12 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 	}
 
 	_, err := b.session.ChannelMessageSendEmbed(channelID, embed)
+	if err == nil && b.rankingUpdater != nil {
+		go func() {
+			if rerr := b.rankingUpdater.Refresh(time.Now()); rerr != nil {
+				getLogger().Errorf("ranking refresh after match: %v", rerr)
+			}
+		}()
+	}
 	return err
 }

@@ -1,0 +1,73 @@
+CREATE TABLE IF NOT EXISTS users (
+    id            SERIAL PRIMARY KEY,
+    discord_id    VARCHAR(20) UNIQUE,
+    dota_id       BIGINT NOT NULL UNIQUE,
+    display_name  VARCHAR(100),
+    registered_at TIMESTAMPTZ DEFAULT NOW(),
+    active        BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS matches (
+    match_id      BIGINT PRIMARY KEY,
+    start_time    TIMESTAMPTZ NOT NULL,
+    duration_secs INT,
+    game_mode     INT,
+    radiant_win   BOOLEAN,
+    parsed        BOOLEAN DEFAULT FALSE,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS parse_queue (
+    match_id      BIGINT PRIMARY KEY REFERENCES matches(match_id),
+    enqueued_at   TIMESTAMPTZ DEFAULT NOW(),
+    last_attempt  TIMESTAMPTZ,
+    attempt_count INT DEFAULT 0,
+    status        VARCHAR(20) DEFAULT 'pending'
+);
+
+CREATE TABLE IF NOT EXISTS player_matches (
+    match_id      BIGINT REFERENCES matches(match_id),
+    dota_id       BIGINT NOT NULL,
+    is_radiant    BOOLEAN,
+    hero_id       INT,
+    kills         INT,
+    deaths        INT,
+    assists       INT,
+    level         INT,
+    gpm           INT,
+    xpm           INT,
+    hero_damage   INT,
+    tower_damage  INT,
+    healing       INT,
+    imp           INT,
+    award         VARCHAR(20),
+    lane          VARCHAR(20),
+    role          VARCHAR(20),
+    won           BOOLEAN,
+    mmr_delta     INT,
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (match_id, dota_id)
+);
+
+CREATE TABLE IF NOT EXISTS last_processed_match (
+    dota_id    BIGINT PRIMARY KEY,
+    match_id   BIGINT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS ranking_messages (
+    message_type VARCHAR(20) PRIMARY KEY,
+    channel_id   VARCHAR(20),
+    message_id   VARCHAR(20),
+    updated_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS config (
+    key        VARCHAR(50) PRIMARY KEY,
+    value      TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_player_matches_dota_id ON player_matches(dota_id);
+CREATE INDEX IF NOT EXISTS idx_player_matches_created_at ON player_matches(created_at);
+CREATE INDEX IF NOT EXISTS idx_matches_start_time ON matches(start_time);

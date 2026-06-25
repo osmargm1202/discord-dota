@@ -852,6 +852,104 @@ func (c *StratzClient) RequestParseMatch(matchID int64) error {
 	return nil
 }
 
+// BackfillMatch is a lightweight match record for historical ingestion.
+type BackfillMatch struct {
+	ID            int64
+	DidRadiantWin bool
+	DurationSecs  int
+	StartDateTime int64
+	GameMode      stratzIntOrStr
+	Players       []BackfillPlayer
+}
+
+// BackfillPlayer has ranking-relevant fields only.
+type BackfillPlayer struct {
+	SteamAccountID      int64  `json:"steamAccountId"`
+	IsRadiant           bool   `json:"isRadiant"`
+	HeroID              int    `json:"heroId"`
+	Kills               int    `json:"kills"`
+	Deaths              int    `json:"deaths"`
+	Assists             int    `json:"assists"`
+	Level               int    `json:"level"`
+	GoldPerMinute       int    `json:"goldPerMinute"`
+	ExperiencePerMinute int    `json:"experiencePerMinute"`
+	HeroDamage          int    `json:"heroDamage"`
+	TowerDamage         int    `json:"towerDamage"`
+	HeroHealing         int    `json:"heroHealing"`
+	Imp                 int    `json:"imp"`
+	Award               string `json:"award"`
+	Lane                string `json:"lane"`
+	Role                string `json:"role"`
+}
+
+// GetPlayerMatchesForBackfill fetches up to `take` matches starting at `skip`,
+// only including matches on or after `afterUnix` (Unix timestamp).
+func (c *StratzClient) GetPlayerMatchesForBackfill(steamAccountID int64, take, skip int, afterUnix int64) ([]BackfillMatch, error) {
+	query := `
+		query BackfillMatches($steamAccountId: Long!, $take: Int!, $skip: Int!, $after: Long!) {
+			player(steamAccountId: $steamAccountId) {
+				matches(request: { take: $take, skip: $skip, startDateTime: $after }) {
+					id
+					didRadiantWin
+					durationSeconds
+					startDateTime
+					gameMode
+					players {
+						steamAccountId
+						isRadiant
+						heroId
+						kills
+						deaths
+						assists
+						level
+						goldPerMinute
+						experiencePerMinute
+						heroDamage
+						towerDamage
+						heroHealing
+						imp
+						award
+						lane
+						role
+					}
+				}
+			}
+		}
+	`
+	var result struct {
+		Player struct {
+			Matches []struct {
+				ID            int64            `json:"id"`
+				DidRadiantWin bool             `json:"didRadiantWin"`
+				DurationSecs  int              `json:"durationSeconds"`
+				StartDateTime int64            `json:"startDateTime"`
+				GameMode      stratzIntOrStr   `json:"gameMode"`
+				Players       []BackfillPlayer `json:"players"`
+			} `json:"matches"`
+		} `json:"player"`
+	}
+	if err := c.makeRequest(query, map[string]interface{}{
+		"steamAccountId": steamAccountID,
+		"take":           take,
+		"skip":           skip,
+		"after":          afterUnix,
+	}, &result); err != nil {
+		return nil, err
+	}
+	out := make([]BackfillMatch, len(result.Player.Matches))
+	for i, m := range result.Player.Matches {
+		out[i] = BackfillMatch{
+			ID:            m.ID,
+			DidRadiantWin: m.DidRadiantWin,
+			DurationSecs:  m.DurationSecs,
+			StartDateTime: m.StartDateTime,
+			GameMode:      m.GameMode,
+			Players:       m.Players,
+		}
+	}
+	return out, nil
+}
+
 // SearchPlayers con Stratz no está soportado (Stratz no expone búsqueda por nombre en la API pública)
 func (c *StratzClient) SearchPlayers(query string) ([]SearchResponse, error) {
 	return nil, ErrSearchNotSupported

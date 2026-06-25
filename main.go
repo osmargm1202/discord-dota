@@ -4,7 +4,12 @@ import (
 	"dota-discord-bot/config"
 	"dota-discord-bot/discord"
 	"dota-discord-bot/dota"
+	"dota-discord-bot/internal/backfill"
+	dbpkg "dota-discord-bot/internal/db"
+	minioclient "dota-discord-bot/internal/minio"
+	"dota-discord-bot/internal/ranking"
 	"dota-discord-bot/storage"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -16,30 +21,24 @@ import (
 )
 
 func main() {
-	// Parsear flag --debug
 	debug := flag.Bool("debug", false, "Activar modo debug (logs en consola)")
 	flag.Parse()
 
-	// Cargar configuración
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error cargando configuración: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Si se pasó --debug, sobrescribir configuración
 	if *debug {
 		cfg.Debug = true
 	}
 
-	// Configurar logger básico para main
 	if cfg.Debug {
 		logrus.SetLevel(logrus.DebugLevel)
-		logrus.SetOutput(os.Stdout)
 	} else {
 		logrus.SetLevel(logrus.InfoLevel)
-		logrus.SetOutput(os.Stdout)
 	}
+	logrus.SetOutput(os.Stdout)
 	logrus.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp:   true,
 		TimestampFormat: "2006-01-02 15:04:05",
@@ -47,58 +46,119 @@ func main() {
 
 	logrus.Info("Iniciando bot de Discord para Dota 2...")
 
-	// Crear almacenamiento
+	// Legacy JSON store (used for migration and fallback)
 	userStore, err := storage.NewUserStore()
 	if err != nil {
 		logrus.Fatalf("Error creando almacenamiento: %v", err)
 	}
 
-	// Cliente OpenDota: código conservado pero no se usa (solo Stratz)
-	dotaClient := dota.NewClient()
+	// PostgreSQL
+	var database *dbpkg.DB
+	if cfg.PostgresDSN != "" {
+		database, err = dbpkg.New(cfg.PostgresDSN)
+		if err != nil {
+			logrus.Fatalf("Error conectando PostgreSQL: %v", err)
+		}
+		if err := database.RunMigrations(); err != nil {
+			logrus.Fatalf("Error ejecutando migraciones: %v", err)
+		}
+		logrus.Info("PostgreSQL conectado y migraciones aplicadas")
 
-	// Stratz es obligatorio: el bot usa solo la API de Stratz
+		// Migrate from JSON files (idempotent)
+		jsonUsers := userStore.GetAll()
+		jsonLastMatches := loadJSONLastMatches()
+		jsonChannel, _ := userStore.GetChannel()
+		if err := database.MigrateFromJSON(jsonUsers, jsonLastMatches, jsonChannel); err != nil {
+			logrus.Warnf("JSON migration warning: %v", err)
+		} else {
+			logrus.Info("JSON migration complete (or already done)")
+		}
+	} else {
+		logrus.Warn("POSTGRES_DSN no configurado — usando solo JSON storage")
+	}
+
+	// MinIO
+	var minioClient *minioclient.Client
+	if cfg.MinioEndpoint != "" && database != nil {
+		minioClient, err = minioclient.New(
+			cfg.MinioEndpoint,
+			cfg.MinioAccessKey,
+			cfg.MinioSecretKey,
+			cfg.MinioBucket,
+			cfg.MinioPublicURL,
+		)
+		if err != nil {
+			logrus.Warnf("MinIO no disponible: %v", err)
+		} else {
+			logrus.Info("MinIO conectado")
+		}
+	}
+
+	// Dota / Stratz clients
+	dotaClient := dota.NewClient()
 	if cfg.StratzToken == "" {
-		logrus.Fatal("STRATZ_TOKEN es obligatorio. El bot usa solo la API de Stratz. Configura STRATZ_TOKEN en .env")
+		logrus.Fatal("STRATZ_TOKEN es obligatorio. El bot usa solo la API de Stratz.")
 	}
 	stratzClient := dota.NewStratzClient(cfg.StratzToken)
 	if cfg.Debug {
 		stratzClient.SetDebug(true)
-		logrus.Info("Debug Stratz activado: request/response en logs/stratz_debug.log")
+		logrus.Info("Debug Stratz activado")
 	}
-	logrus.Info("Cliente de Stratz configurado (solo Stratz)")
 
-	// Crear bot
-	bot, err := discord.NewBot(cfg, dotaClient, stratzClient, userStore)
+	// Bot
+	bot, err := discord.NewBot(cfg, dotaClient, stratzClient, userStore, database, minioClient)
 	if err != nil {
 		logrus.Fatalf("Error creando bot: %v", err)
 	}
-
-	// Iniciar bot
 	if err := bot.Start(); err != nil {
 		logrus.Fatalf("Error iniciando bot: %v", err)
 	}
-
 	logrus.Info("Bot corriendo. Presiona CTRL+C para salir.")
 
-	// Enviar mensaje de bienvenida y verificar partidas inmediatamente
+	// Init ranking channel + updater
+	if database != nil && minioClient != nil && cfg.RankingChannelID != "" {
+		rankingUpdater := ranking.NewUpdater(
+			database,
+			minioClient,
+			bot.Session(),
+			cfg.RankingChannelID,
+			cfg.BaseYear,
+		)
+		bot.SetRankingUpdater(rankingUpdater)
+		go func() {
+			time.Sleep(5 * time.Second)
+			if err := rankingUpdater.InitChannel(); err != nil {
+				logrus.Errorf("ranking init: %v", err)
+			}
+		}()
+	}
+
+	// Welcome + immediate match check
 	go func() {
-		time.Sleep(2 * time.Second) // Esperar un poco para asegurar que el bot esté completamente conectado
+		time.Sleep(2 * time.Second)
 		if err := bot.SendWelcomeMessage(); err != nil {
 			logrus.Warnf("No se pudo enviar mensaje de bienvenida: %v", err)
 		}
-		// Verificación INMEDIATA de partidas al iniciar
 		logrus.Info("Ejecutando verificación inmediata de partidas...")
 		if err := bot.CheckForNewMatches(); err != nil {
 			logrus.Errorf("Error en verificación inicial: %v", err)
 		}
 	}()
 
-	// Configurar polling cada REFRESH_RATE minutos (por defecto 1)
+	// Historical backfill (runs in background, rate-limited, idempotent)
+	if database != nil {
+		bfSvc := backfill.New(database, stratzClient, cfg.BaseYear, cfg.BackfillDelayMS)
+		bot.SetBackfillService(bfSvc)
+		go func() {
+			time.Sleep(15 * time.Second) // let bot fully settle first
+			bfSvc.Run()
+		}()
+	}
+
+	// Polling ticker
 	ticker := time.NewTicker(time.Duration(cfg.RefreshRateMinutes) * time.Minute)
 	defer ticker.Stop()
 	logrus.Infof("Verificación de partidas cada %d minuto(s)", cfg.RefreshRateMinutes)
-
-	// Loop de polling
 	go func() {
 		for range ticker.C {
 			logrus.Debug("Ejecutando verificación periódica de partidas...")
@@ -108,10 +168,8 @@ func main() {
 		}
 	}()
 
-	// Scheduler diario de stats (STATS_TIME en .env, ej. 20:00)
 	go bot.RunStatsScheduler()
 
-	// Esperar señal de interrupción
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
@@ -119,4 +177,16 @@ func main() {
 	logrus.Info("Cerrando bot...")
 	bot.Stop()
 	logrus.Info("Bot cerrado exitosamente")
+}
+
+func loadJSONLastMatches() map[string]int64 {
+	data, err := os.ReadFile("data/last_matches.json")
+	if err != nil {
+		return nil
+	}
+	var m map[string]int64
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
+	return m
 }

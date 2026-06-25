@@ -145,13 +145,19 @@ func main() {
 		}
 	}()
 
-	// Historical backfill (runs in background, rate-limited, idempotent)
+	// Historical backfill (idempotent — skips already-stored matches)
 	if database != nil {
 		bfSvc := backfill.New(database, stratzClient, cfg.BaseYear, cfg.BackfillDelayMS)
 		bot.SetBackfillService(bfSvc)
 		go func() {
-			time.Sleep(15 * time.Second) // let bot fully settle first
+			time.Sleep(15 * time.Second)
 			bfSvc.Run()
+			// Re-run every 6h — catches users registered after initial startup
+			ticker := time.NewTicker(6 * time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				bfSvc.Run()
+			}
 		}()
 	}
 

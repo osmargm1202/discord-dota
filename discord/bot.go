@@ -499,6 +499,19 @@ func (b *Bot) handleRegisterSlash(s *discordgo.Session, i *discordgo.Interaction
 		personaname = "Jugador"
 	}
 
+	// Persistir en PostgreSQL si está disponible
+	if b.db != nil {
+		pname := personaname
+		if err := b.db.UpsertUser(&userID, accountIDInt, &pname); err != nil {
+			getLogger().Warnf("register: upsert PG user %s: %v", userID, err)
+		} else {
+			// Disparar backfill para este usuario en background
+			if b.backfillSvc != nil {
+				go b.backfillSvc.RunForUser(accountIDInt)
+			}
+		}
+	}
+
 	b.sendFollowup(s, i, fmt.Sprintf("✅ **%s** (Discord) asociado con **%s** (Dota 2)\nID de Dota: %s", discordUsername, personaname, accountID))
 	getLogger().Infof("Usuario Discord %s (%s) registrado con account_id %s", userID, discordUsername, accountID)
 }

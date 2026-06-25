@@ -1,6 +1,7 @@
 package ranking
 
 import (
+	"bytes"
 	"context"
 	"dota-discord-bot/internal/db"
 	minioclient "dota-discord-bot/internal/minio"
@@ -66,9 +67,10 @@ func (u *Updater) InitChannel() error {
 	return u.Refresh(time.Now())
 }
 
-// Refresh recalculates, regenerates PNGs, uploads to MinIO, and edits the 3 Discord messages.
+// Refresh recalculates, regenerates PNGs, and edits the 3 Discord messages as file attachments.
+// MinIO upload is optional (archiving); the pinned message uses Discord attachment directly.
 func (u *Updater) Refresh(now time.Time) error {
-	if u.channelID == "" || u.minio == nil {
+	if u.channelID == "" {
 		return nil
 	}
 	weekStart, weekEnd := WeekBounds(now)
@@ -77,7 +79,6 @@ func (u *Updater) Refresh(now time.Time) error {
 		weekEnd.AddDate(0, 0, -1).Format("Mon Jan 02, 2006"))
 
 	year, week := now.ISOWeek()
-	ctx := context.Background()
 
 	type imageJob struct {
 		msgType string
@@ -121,27 +122,43 @@ func (u *Updater) Refresh(now time.Time) error {
 		},
 	}
 
+	ctx := context.Background()
 	for _, job := range jobs {
 		imgBytes, err := job.render()
 		if err != nil {
 			logrus.Errorf("ranking: render %s: %v", job.msgType, err)
 			continue
 		}
-		imgURL, err := u.minio.Upload(ctx, job.key, imgBytes)
-		if err != nil {
-			logrus.Errorf("ranking: upload %s: %v", job.msgType, err)
-			continue
+
+		// Upload to MinIO for archiving (optional — skip if not configured)
+		if u.minio != nil {
+			if _, merr := u.minio.Upload(ctx, job.key, imgBytes); merr != nil {
+				logrus.Warnf("ranking: minio upload %s: %v (continuando sin MinIO)", job.msgType, merr)
+			}
 		}
+
 		_, msgID, err := u.db.GetRankingMessage(job.msgType)
 		if err != nil || msgID == "" {
 			logrus.Warnf("ranking: no message ID for %s", job.msgType)
 			continue
 		}
-		embed := &discordgo.MessageEmbed{
-			Image: &discordgo.MessageEmbedImage{URL: imgURL},
-			Color: 0xC8AA6E,
-		}
-		if _, err := u.session.ChannelMessageEditEmbed(u.channelID, msgID, embed); err != nil {
+
+		// Edit pinned message with file attachment — works without public MinIO URL
+		filename := fmt.Sprintf("ranking-%s.png", job.msgType)
+		emptyStr := ""
+		_, err = u.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
+			ID:      msgID,
+			Channel: u.channelID,
+			Content: &emptyStr,
+			Files: []*discordgo.File{
+				{
+					Name:        filename,
+					ContentType: "image/png",
+					Reader:      bytes.NewReader(imgBytes),
+				},
+			},
+		})
+		if err != nil {
 			logrus.Errorf("ranking: edit message %s (%s): %v", job.msgType, msgID, err)
 		}
 	}

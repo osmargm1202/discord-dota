@@ -67,25 +67,24 @@ pg_isready -h 127.0.0.1 -p "$PG_PORT" -U dotabot || { echo "ERROR: PostgreSQL no
 createdb -h 127.0.0.1 -p "$PG_PORT" -U dotabot dotabot
 echo "==> PostgreSQL listo."
 
-# ---- MinIO local ----
-echo "==> Iniciando MinIO local en puerto $MINIO_PORT..."
-MINIO_ROOT_USER=minioadmin \
-MINIO_ROOT_PASSWORD=minioadmin \
-minio server "$MINIO_DIR" --address "127.0.0.1:$MINIO_PORT" --console-address "127.0.0.1:$((MINIO_PORT+1))" &>/tmp/minio-local.log &
-MINIO_PID=$!
-sleep 3
-kill -0 "$MINIO_PID" 2>/dev/null || { echo "ERROR: MinIO no arrancó. Log:"; cat /tmp/minio-local.log; exit 1; }
-echo "==> MinIO listo."
-
-# ---- Cargar .env y sobreescribir con valores locales ----
+# ---- Cargar .env primero (necesitamos las creds de MinIO) ----
 set -a
 source "$ROOT/.env"
 set +a
 
+# ---- MinIO local ----
+echo "==> Iniciando MinIO local en puerto $MINIO_PORT..."
+# Usa MINIO_ACCESS_KEY/MINIO_SECRET_KEY del .env como credenciales root
+MINIO_ROOT_USER="${MINIO_ACCESS_KEY:-minioadmin}" \
+MINIO_ROOT_PASSWORD="${MINIO_SECRET_KEY:-minioadmin}" \
+minio server "$MINIO_DIR" --address "127.0.0.1:$MINIO_PORT" --console-address "127.0.0.1:$((MINIO_PORT+1))" &>/tmp/minio-local.log &
+MINIO_PID=$!
+sleep 3
+kill -0 "$MINIO_PID" 2>/dev/null || { echo "ERROR: MinIO no arrancó. Log:"; cat /tmp/minio-local.log; exit 1; }
+echo "==> MinIO listo (user: ${MINIO_ACCESS_KEY:-minioadmin})."
+
 export POSTGRES_DSN="postgres://dotabot@127.0.0.1:$PG_PORT/dotabot?sslmode=disable"
 export MINIO_ENDPOINT="127.0.0.1:$MINIO_PORT"
-export MINIO_ACCESS_KEY="minioadmin"
-export MINIO_SECRET_KEY="minioadmin"
 export MINIO_PUBLIC_URL="http://127.0.0.1:$MINIO_PORT"
 export DEBUG="${DEBUG:-true}"
 

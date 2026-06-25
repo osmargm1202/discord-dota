@@ -5,6 +5,8 @@
 # Data y logs
 data/
 logs/
+postgres-data/
+minio-data/
 
 # Binarios
 dota-discord-bot

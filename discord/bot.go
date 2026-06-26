@@ -1947,6 +1947,38 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		direMatchPlayers = append(direMatchPlayers, buildMatchPlayer(p, p.AccountID == player.AccountID))
 	}
 
+	// Build notification header visible in Discord previews (no need to open image)
+	resultEmoji := "✅"
+	resultLabel := "Victoria"
+	if !isWin {
+		resultEmoji = "❌"
+		resultLabel = "Derrota"
+	}
+	// Extract player's own lane result from the multiline laneSummary
+	playerLaneOutcomeLine := ""
+	for _, ln := range strings.Split(laneSummary, "\n") {
+		if strings.Contains(ln, "(tú)") {
+			if parts := strings.SplitN(ln, ":", 2); len(parts) == 2 {
+				val := strings.TrimSpace(parts[1])
+				lo := strings.ToLower(val)
+				switch {
+				case strings.Contains(lo, "victoria"):
+					playerLaneOutcomeLine = "✅ Victoria en fase de línea"
+				case strings.Contains(lo, "derrota"):
+					playerLaneOutcomeLine = "❌ Derrota en fase de línea"
+				case strings.Contains(lo, "empate"):
+					playerLaneOutcomeLine = "➖ Empate en fase de línea"
+				}
+			}
+			break
+		}
+	}
+	msgHeader := fmt.Sprintf("**%s - %s %s**\n%s | %s", personaname, resultEmoji, resultLabel, heroName, gameModeDisplayName)
+	if playerLaneOutcomeLine != "" {
+		msgHeader += "\n" + playerLaneOutcomeLine
+	}
+	msgContent := msgHeader + "\n" + stratzURL
+
 	var sendErr error
 
 	// Try PNG path when DB is available (new mode)
@@ -1993,12 +2025,12 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 			if upErr != nil {
 				getLogger().Warnf("upload match PNG: %v — sending as attachment", upErr)
 				_, sendErr = b.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-					Content: stratzURL,
+					Content: msgContent,
 					Files:   []*discordgo.File{{Name: "partida.png", ContentType: "image/png", Reader: bytes.NewReader(imgBytes)}},
 				})
 			} else {
 				_, sendErr = b.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-					Content: stratzURL,
+					Content: msgContent,
 					Embeds: []*discordgo.MessageEmbed{{
 						Image: &discordgo.MessageEmbedImage{URL: imgURL},
 						Color: resultColor,

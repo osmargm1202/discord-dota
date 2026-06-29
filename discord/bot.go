@@ -647,13 +647,15 @@ func (b *Bot) buildStatsEmbed(heroStats []dota.StratzHeroStats, minGames, take i
 
 func (b *Bot) handleQueueSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if len(b.pendingMatches) == 0 {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "✅ No hay partidas en cola — todas notificadas.",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
+		// Check DB for any that survived a restart
+		if b.db != nil {
+			dbIDs, _ := b.db.GetPendingParseQueue()
+			if len(dbIDs) > 0 {
+				b.sendFollowup(s, i, fmt.Sprintf("⏳ **%d** partida(s) en cola en DB (bot reiniciado, sin detalle en memoria).\nMatch IDs: %v", len(dbIDs), dbIDs))
+				return
+			}
+		}
+		b.sendFollowup(s, i, "✅ No hay partidas en cola — todas notificadas.")
 		return
 	}
 	var fields []*discordgo.MessageEmbedField
@@ -669,30 +671,13 @@ func (b *Bot) handleQueueSlash(s *discordgo.Session, i *discordgo.InteractionCre
 			Inline: false,
 		})
 	}
-	// Also check DB for any that survived a restart
-	if b.db != nil {
-		dbIDs, _ := b.db.GetPendingParseQueue()
-		if len(dbIDs) > len(b.pendingMatches) {
-			fields = append(fields, &discordgo.MessageEmbedField{
-				Name:   "📦 DB cola",
-				Value:  fmt.Sprintf("%d partida(s) pendientes en DB (bot reiniciado)", len(dbIDs)),
-				Inline: false,
-			})
-		}
-	}
 	embed := &discordgo.MessageEmbed{
 		Title:       "⏳ Cola de parseo — Stratz",
 		Description: "Partidas detectadas esperando que Stratz termine de parsear.",
 		Fields:      fields,
 		Color:       0xF39C12,
 	}
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Embeds: []*discordgo.MessageEmbed{embed},
-			Flags:  discordgo.MessageFlagsEphemeral,
-		},
-	})
+	b.sendFollowupEmbed(s, i, embed)
 }
 
 func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {

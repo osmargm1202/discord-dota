@@ -1183,21 +1183,29 @@ func (b *Bot) CheckForNewMatches() error {
 		}
 
 		// Si PARSED=true: solo notificar cuando la partida esté parseada (parsedDateTime > 0)
-		if b.config.RequireParsed && matchDetailsStratz != nil && !dota.IsMatchParsed(matchDetailsStratz) {
-			parsedVal := "null"
-			if matchDetailsStratz.ParsedDateTime != nil {
-				parsedVal = strconv.FormatInt(*matchDetailsStratz.ParsedDateTime, 10)
+		if b.config.RequireParsed && (matchDetailsStratz == nil || !dota.IsMatchParsed(matchDetailsStratz)) {
+			parsedVal := "nil match"
+			if matchDetailsStratz != nil {
+				if matchDetailsStratz.ParsedDateTime == nil {
+					parsedVal = "parsedDateTime=null"
+				} else {
+					parsedVal = fmt.Sprintf("parsedDateTime=%d", *matchDetailsStratz.ParsedDateTime)
+				}
 			}
-			getLogger().Debugf("Partida %d no parseada (parsedDateTime=%s), solicitando parse y omitiendo notificación este ciclo", latestStratzMatch.ID, parsedVal)
-			if errParse := b.stratzClient.RequestParseMatch(latestStratzMatch.ID); errParse != nil {
-				getLogger().Debugf("RequestParseMatch para %d: %v (la API puede no exponer la mutación)", latestStratzMatch.ID, errParse)
+			getLogger().Infof("Partida %d esperando parseo (%s), reintentando siguiente ciclo", latestStratzMatch.ID, parsedVal)
+			if matchDetailsStratz != nil {
+				if errParse := b.stratzClient.RequestParseMatch(latestStratzMatch.ID); errParse != nil {
+					getLogger().Debugf("RequestParseMatch para %d: %v", latestStratzMatch.ID, errParse)
+				}
 			}
 			// Track in memory for /dota queue
 			heroName := ""
-			for _, sp := range matchDetailsStratz.Players {
-				if sp.SteamAccountID == accountIDInt {
-					heroName = b.dotaClient.GetHeroName(sp.HeroID)
-					break
+			if matchDetailsStratz != nil {
+				for _, sp := range matchDetailsStratz.Players {
+					if sp.SteamAccountID == accountIDInt {
+						heroName = b.dotaClient.GetHeroName(sp.HeroID)
+						break
+					}
 				}
 			}
 			if _, exists := b.pendingMatches[discordID]; !exists {
@@ -1218,8 +1226,10 @@ func (b *Bot) CheckForNewMatches() error {
 
 		// Esperar 10s tras partida parseada para que Stratz tenga listos todos los datos del parseo (imp, award, etc.)
 		if matchDetailsStratz != nil && dota.IsMatchParsed(matchDetailsStratz) {
-			getLogger().Debugf("Partida %d parseada (parsedDateTime presente), esperando 10s antes de solicitar datos", latestStratzMatch.ID)
+			getLogger().Infof("Partida %d parseada (parsedDateTime=%d), esperando 10s y notificando", latestStratzMatch.ID, *matchDetailsStratz.ParsedDateTime)
 			time.Sleep(10 * time.Second)
+		} else {
+			getLogger().Infof("Partida %d procesando sin parsedDateTime (RequireParsed=%v)", latestStratzMatch.ID, b.config.RequireParsed)
 		}
 
 		// Buscar al jugador en la partida

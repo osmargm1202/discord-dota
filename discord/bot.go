@@ -642,6 +642,7 @@ func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCre
 	minGames := b.config.StatsMinGames
 	take := b.config.StatsTake
 	getLogger().Debugf("stats: mostrando %d usuario(s) registrado(s)", len(users))
+	gen := ranking.NewImageGenerator()
 	sent := 0
 	for _, accountID := range users {
 		accountIDInt, errParse := strconv.ParseInt(accountID, 10, 64)
@@ -659,10 +660,55 @@ func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCre
 			getLogger().Debugf("stats: sin héroes con ≥%d partidas para %s", minGames, accountID)
 			continue
 		}
-		embed := b.buildStatsEmbed(heroStats, minGames, take, playerName, avatarURL)
-		b.sendFollowupEmbed(s, i, embed)
+
+		// Resolve hero names and build render data
+		rows := make([]ranking.HeroStatRow, 0, len(heroStats))
+		for _, h := range heroStats {
+			name := b.dotaClient.GetHeroName(h.HeroID)
+			if name == "" {
+				name = fmt.Sprintf("Hero %d", h.HeroID)
+			}
+			rows = append(rows, ranking.HeroStatRow{
+				HeroName:   name,
+				WinCount:   h.WinCount,
+				MatchCount: h.MatchCount,
+			})
+		}
+
+		// Fetch avatar bytes (best-effort from MinIO cache)
+		var avatarBytes []byte
+		if b.minioClient != nil {
+			key := fmt.Sprintf("assets/avatars/%s.jpg", accountID)
+			avatarBytes, _ = b.minioClient.GetCached(context.Background(), key)
+			if len(avatarBytes) == 0 && avatarURL != "" {
+				avatarBytes, _ = b.minioClient.GetOrFetchAsset(context.Background(), key, avatarURL)
+			}
+		}
+
+		renderData := ranking.PlayerStatsRenderData{
+			PlayerName:  playerName,
+			AvatarBytes: avatarBytes,
+			Heroes:      rows,
+			TotalGames:  take,
+			MinGames:    minGames,
+		}
+		imgBytes, renderErr := gen.RenderPlayerStats(renderData)
+		if renderErr != nil {
+			getLogger().Errorf("stats: render PNG %s: %v", accountID, renderErr)
+			// fallback to embed
+			embed := b.buildStatsEmbed(heroStats, minGames, take, playerName, avatarURL)
+			b.sendFollowupEmbed(s, i, embed)
+		} else {
+			fname := fmt.Sprintf("stats-%s.png", accountID)
+			_, ferr := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+				Files: []*discordgo.File{{Name: fname, ContentType: "image/png", Reader: bytes.NewReader(imgBytes)}},
+			})
+			if ferr != nil {
+				getLogger().Errorf("stats: send PNG followup: %v", ferr)
+			}
+		}
 		sent++
-		time.Sleep(500 * time.Millisecond) // evitar rate limit entre followups
+		time.Sleep(500 * time.Millisecond)
 	}
 	if sent == 0 {
 		b.sendFollowup(s, i, fmt.Sprintf("Ningún jugador registrado tiene héroes con al menos %d partidas en las últimas %d partidas analizadas.", minGames, take))
@@ -1405,11 +1451,11 @@ func formatLaneOutcomeEnum(outcome string) string {
 	case "RADIANT_VICTORY":
 		return "Victoria Radiant"
 	case "RADIANT_STOMP":
-		return "Stomp Radiant"
+		return "💥 Stomp Radiant"
 	case "DIRE_VICTORY":
 		return "Victoria Dire"
 	case "DIRE_STOMP":
-		return "Stomp Dire"
+		return "💥 Stomp Dire"
 	case "TIE":
 		return "Empate"
 	default:
@@ -1922,6 +1968,11 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		if mp.HeroName == "" {
 			mp.HeroName = fmt.Sprintf("Hero %d", p.HeroID)
 		}
+		// IMP is per-match data available for all players
+		if p.Imp != 0 {
+			mp.IMP = p.Imp
+			mp.ShowIMP = true
+		}
 		if vp, ok := verifiedByAccountID[p.AccountID]; ok {
 			mp.PlayerName = vp.PlayerName
 			if vp.WinLoss != nil {
@@ -2011,6 +2062,7 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 			AvatarBytes:     avatarBytes,
 			RadiantPlayers:  radiantMatchPlayers,
 			DirePlayers:     direMatchPlayers,
+			RadiantWon:      match.RadiantWin != nil && *match.RadiantWin,
 		}
 		gen := ranking.NewImageGenerator()
 		imgBytes, renderErr := gen.RenderMatch(matchData)

@@ -22,6 +22,8 @@ type MatchPlayer struct {
 	WinRate    float64 // -1 = unknown
 	Wins       int
 	Losses     int
+	IMP        int  // Individual Match Performance from Stratz (0 = not available)
+	ShowIMP    bool // true when Stratz returned a non-zero IMP
 }
 
 // MatchRenderData holds all display data for a match notification PNG.
@@ -57,6 +59,7 @@ type MatchRenderData struct {
 	// 5v5 player list (may be empty)
 	RadiantPlayers []MatchPlayer
 	DirePlayers    []MatchPlayer
+	RadiantWon     bool // true = Radiant won; false = Dire won
 }
 
 // RenderMatch generates a rich PNG card for a match notification.
@@ -121,6 +124,17 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 	if !d.IsWin {
 		resultColor = colorRed
 		resultText = "DERROTA"
+	}
+
+	// Match outcome icon from Stratz AnalysisOutcome
+	outcomeIcon := ""
+	switch strings.ToUpper(d.AnalysisOutcome) {
+	case "STOMPED":
+		outcomeIcon = " 💥"
+	case "COMEBACK":
+		outcomeIcon = " 🔄"
+	case "CLOSE_GAME":
+		outcomeIcon = " ⚔️"
 	}
 
 	y := 0.0
@@ -252,7 +266,7 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 	dc.DrawRectangle(0, y, w, detailH)
 	dc.Fill()
 
-	score := fmt.Sprintf("Radiant %d — %d Dire", d.RadiantScore, d.DireScore)
+	score := fmt.Sprintf("Radiant %d — %d Dire%s", d.RadiantScore, d.DireScore, outcomeIcon)
 	stats2 := []statCell{
 		{"Score", score},
 		{"Récord héroe (últ.20)", d.HeroRecord},
@@ -329,19 +343,35 @@ func (g *ImageGenerator) RenderMatch(d MatchRenderData) ([]byte, error) {
 
 	// ── 5v5 Player list ───────────────────────────────────────────────────
 	if hasPlayers {
+		// Winner = bright, loser = dim
+		radiantAlpha, direAlpha := 0.70, 0.30
+		if !d.RadiantWon {
+			radiantAlpha, direAlpha = 0.30, 0.70
+		}
+
 		// Radiant header
-		dc.SetRGBA(0.08, 0.42, 0.12, 0.70)
+		dc.SetRGBA(0.08, 0.42, 0.12, radiantAlpha)
 		dc.DrawRectangle(0, y, w/2, plHeaderH)
 		dc.Fill()
 		// Dire header
-		dc.SetRGBA(0.50, 0.10, 0.10, 0.70)
+		dc.SetRGBA(0.50, 0.10, 0.10, direAlpha)
 		dc.DrawRectangle(w/2, y, w/2, plHeaderH)
 		dc.Fill()
 
+		radiantLabel := "☀  RADIANT"
+		direLabel := "🌙  DIRE"
+		if outcomeIcon != "" {
+			if d.RadiantWon {
+				radiantLabel += outcomeIcon
+			} else {
+				direLabel += outcomeIcon
+			}
+		}
+
 		g.loadFont(dc, 12)
 		dc.SetColor(colorWhite)
-		dc.DrawStringAnchored("☀  RADIANT", w/4, y+plHeaderH/2, 0.5, 0.5)
-		dc.DrawStringAnchored("🌙  DIRE", w*3/4, y+plHeaderH/2, 0.5, 0.5)
+		dc.DrawStringAnchored(radiantLabel, w/4, y+plHeaderH/2, 0.5, 0.5)
+		dc.DrawStringAnchored(direLabel, w*3/4, y+plHeaderH/2, 0.5, 0.5)
 
 		// Divider line
 		dc.SetColor(colorGold)
@@ -426,15 +456,30 @@ func drawMatchPlayerRow(g *ImageGenerator, dc *gg.Context, p MatchPlayer, startX
 	dc.SetColor(colorGray)
 	dc.DrawStringAnchored(truncateStr(p.PlayerName, 12), startX+colW*0.52, cy, 0.5, 0.5)
 
-	// Win rate
+	// IMP on far right
 	g.loadFont(dc, 11)
+	wrRight := startX + colW - 6
+	if p.ShowIMP {
+		impStr := fmt.Sprintf("%+d", p.IMP)
+		switch {
+		case p.IMP > 0:
+			dc.SetColor(colorGreen)
+		case p.IMP < 0:
+			dc.SetColor(colorRed)
+		default:
+			dc.SetColor(colorGray)
+		}
+		dc.DrawStringAnchored(impStr, wrRight, cy, 1, 0.5)
+		wrRight -= 40
+	}
+	// Win rate
 	if p.WinRate >= 0 {
 		dc.SetColor(winPctColor(p.WinRate))
 		wr := fmt.Sprintf("%.0f%%(%d-%d)", p.WinRate, p.Wins, p.Losses)
-		dc.DrawStringAnchored(wr, startX+colW-6, cy, 1, 0.5)
+		dc.DrawStringAnchored(wr, wrRight, cy, 1, 0.5)
 	} else {
 		dc.SetColor(colorGray)
-		dc.DrawStringAnchored("—", startX+colW-6, cy, 1, 0.5)
+		dc.DrawStringAnchored("—", wrRight, cy, 1, 0.5)
 	}
 }
 

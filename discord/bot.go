@@ -38,6 +38,14 @@ type Bot struct {
 	backfillSvc    *backfill.Service
 	initialRunDone bool // false on first CheckForNewMatches — always processes latest match
 	matchRetries   map[string]int // "discordID:matchID" → retry count when player not found in match
+	pendingMatches map[string]pendingMatch // discordID → match pending parse
+}
+
+type pendingMatch struct {
+	MatchID     int64
+	HeroName    string
+	PlayerName  string
+	DetectedAt  time.Time
 }
 
 func NewBot(cfg *config.Config, dotaClient *dota.Client, stratzClient *dota.StratzClient, userStore *storage.UserStore, database *dbpkg.DB, minioClient *minioclient.Client) (*Bot, error) {
@@ -59,7 +67,8 @@ func NewBot(cfg *config.Config, dotaClient *dota.Client, stratzClient *dota.Stra
 		searchCache:  make(map[string][]dota.SearchResponse),
 		db:           database,
 		minioClient:  minioClient,
-		matchRetries: make(map[string]int),
+		matchRetries:   make(map[string]int),
+		pendingMatches: make(map[string]pendingMatch),
 	}
 
 	// Cambiar a interactionCreate para manejar slash commands
@@ -168,6 +177,11 @@ func (b *Bot) registerCommands() error {
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
 					Name:        "stats",
 					Description: "Estadísticas por héroe en el parche actual (W/L, % victorias)",
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "queue",
+					Description: "Ver partidas en cola esperando parseo de Stratz",
 				},
 				{
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
@@ -299,6 +313,8 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 		b.handleChannelSlash(s, i, subcommand)
 	case "stats":
 		b.handleStatsSlash(s, i)
+	case "queue":
+		b.handleQueueSlash(s, i)
 	case "help":
 		b.handleHelpSlash(s, i)
 	case "ranking", "rankings":
@@ -627,6 +643,56 @@ func (b *Bot) buildStatsEmbed(heroStats []dota.StratzHeroStats, minGames, take i
 		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: avatarURL}
 	}
 	return embed
+}
+
+func (b *Bot) handleQueueSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if len(b.pendingMatches) == 0 {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "✅ No hay partidas en cola — todas notificadas.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+	var fields []*discordgo.MessageEmbedField
+	for _, pm := range b.pendingMatches {
+		waiting := time.Since(pm.DetectedAt).Round(time.Second)
+		hero := pm.HeroName
+		if hero == "" {
+			hero = "—"
+		}
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   pm.PlayerName,
+			Value:  fmt.Sprintf("Match `%d` • %s • esperando **%s**", pm.MatchID, hero, waiting),
+			Inline: false,
+		})
+	}
+	// Also check DB for any that survived a restart
+	if b.db != nil {
+		dbIDs, _ := b.db.GetPendingParseQueue()
+		if len(dbIDs) > len(b.pendingMatches) {
+			fields = append(fields, &discordgo.MessageEmbedField{
+				Name:   "📦 DB cola",
+				Value:  fmt.Sprintf("%d partida(s) pendientes en DB (bot reiniciado)", len(dbIDs)),
+				Inline: false,
+			})
+		}
+	}
+	embed := &discordgo.MessageEmbed{
+		Title:       "⏳ Cola de parseo — Stratz",
+		Description: "Partidas detectadas esperando que Stratz termine de parsear.",
+		Fields:      fields,
+		Color:       0xF39C12,
+	}
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Embeds: []*discordgo.MessageEmbed{embed},
+			Flags:  discordgo.MessageFlagsEphemeral,
+		},
+	})
 }
 
 func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -1141,6 +1207,35 @@ func (b *Bot) CheckForNewMatches() error {
 			if errParse := b.stratzClient.RequestParseMatch(latestStratzMatch.ID); errParse != nil {
 				getLogger().Debugf("RequestParseMatch para %d: %v (la API puede no exponer la mutación)", latestStratzMatch.ID, errParse)
 			}
+			// Track in memory for /dota queue
+			heroName := ""
+			for _, sp := range matchDetailsStratz.Players {
+				if sp.SteamAccountID == accountIDInt {
+					heroName = b.dotaClient.GetHeroName(sp.HeroID)
+					break
+				}
+			}
+			if _, exists := b.pendingMatches[discordID]; !exists {
+				playerLabel, _ := b.getPlayerNameAndAvatar(accountID, accountIDInt)
+				if playerLabel == "" {
+					playerLabel = accountID
+				}
+				b.pendingMatches[discordID] = pendingMatch{
+					MatchID:    latestStratzMatch.ID,
+					HeroName:   heroName,
+					PlayerName: playerLabel,
+					DetectedAt: time.Now(),
+				}
+				// Persist to DB parse_queue (best-effort)
+				if b.db != nil {
+					startTime := time.Unix(matchDetailsStratz.StartDateTime, 0).UTC()
+					if err2 := b.db.UpsertMatch(latestStratzMatch.ID, startTime, matchDetailsStratz.DurationSeconds, int(matchDetailsStratz.GameMode), matchDetailsStratz.DidRadiantWin, false); err2 == nil {
+						_ = b.db.EnqueueParse(latestStratzMatch.ID)
+					}
+				}
+			} else if b.db != nil {
+				_ = b.db.IncrementParseAttempt(latestStratzMatch.ID)
+			}
 			// No actualizar lastMatchID: en el siguiente ciclo se reintentará
 			continue
 		}
@@ -1233,7 +1328,9 @@ func (b *Bot) CheckForNewMatches() error {
 		// Save new match to PostgreSQL so ranking reflects it
 		if b.db != nil && !alreadyProcessed {
 			b.storeNewMatchToDB(matchDetailsStratz, playerStratz, accountIDInt)
+			_ = b.db.MarkParseDone(latestStratzMatch.ID)
 		}
+		delete(b.pendingMatches, discordID)
 
 		// Don't overwrite last match ID if this was just a catch-up display (already processed)
 		if !alreadyProcessed {

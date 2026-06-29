@@ -1211,15 +1211,6 @@ func (b *Bot) CheckForNewMatches() error {
 					PlayerName: playerLabel,
 					DetectedAt: time.Now(),
 				}
-				// Persist to DB parse_queue (best-effort)
-				if b.db != nil {
-					startTime := time.Unix(matchDetailsStratz.StartDateTime, 0).UTC()
-					if err2 := b.db.UpsertMatch(latestStratzMatch.ID, startTime, matchDetailsStratz.DurationSeconds, int(matchDetailsStratz.GameMode), matchDetailsStratz.DidRadiantWin, false); err2 == nil {
-						_ = b.db.EnqueueParse(latestStratzMatch.ID)
-					}
-				}
-			} else if b.db != nil {
-				_ = b.db.IncrementParseAttempt(latestStratzMatch.ID)
 			}
 			// No actualizar lastMatchID: en el siguiente ciclo se reintentará
 			continue
@@ -1336,7 +1327,7 @@ func (b *Bot) storeNewMatchToDB(m *dota.StratzMatch, p *dota.StratzPlayer, dotaI
 		return
 	}
 	startTime := time.Unix(m.StartDateTime, 0).UTC()
-	if err := b.db.UpsertMatch(m.ID, startTime, m.DurationSeconds, int(m.GameMode), m.DidRadiantWin, false); err != nil {
+	if err := b.db.UpsertMatch(m.ID, startTime, m.DurationSeconds, int(m.GameMode), m.DidRadiantWin, true); err != nil {
 		getLogger().Warnf("storeNewMatch: upsert match %d: %v", m.ID, err)
 		return
 	}

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	"image/color"
 	stdraw "image/draw"
 	_ "image/jpeg"
 	_ "image/png"
+	"math"
 	"strings"
 	"time"
 
@@ -22,8 +24,9 @@ type MatchPlayer struct {
 	WinRate    float64 // -1 = unknown
 	Wins       int
 	Losses     int
-	IMP        int  // Individual Match Performance from Stratz (0 = not available)
-	ShowIMP    bool // true when Stratz returned a non-zero IMP
+	IMP        int    // Individual Match Performance from Stratz (0 = not available)
+	ShowIMP    bool   // true when Stratz returned a non-zero IMP
+	Award      string // "MVP", "TOP_CORE", "TOP_SUPPORT", "NONE" or ""
 }
 
 // MatchRenderData holds all display data for a match notification PNG.
@@ -451,6 +454,12 @@ func drawMatchPlayerRow(g *ImageGenerator, dc *gg.Context, p MatchPlayer, startX
 	}
 	dc.DrawStringAnchored(truncateStr(p.HeroName, 14), startX+8, cy, 0, 0.5)
 
+	// Award badge (between hero name and player name)
+	award := strings.ToUpper(p.Award)
+	if award != "" && award != "NONE" {
+		drawAwardBadge(g, dc, award, startX+colW*0.315, cy)
+	}
+
 	// Player name
 	g.loadFont(dc, 11)
 	dc.SetColor(colorGray)
@@ -481,6 +490,93 @@ func drawMatchPlayerRow(g *ImageGenerator, dc *gg.Context, p MatchPlayer, startX
 		dc.SetColor(colorGray)
 		dc.DrawStringAnchored("—", wrRight, cy, 1, 0.5)
 	}
+}
+
+// drawAwardBadge draws a small medal badge (MVP/CORE/SUPPORT) centered at (cx, cy).
+func drawAwardBadge(g *ImageGenerator, dc *gg.Context, award string, cx, cy float64) {
+	const r = 7.5
+	const petals = 12
+
+	var badgeColor color.RGBA
+	var label string
+	var textColor color.RGBA
+
+	switch award {
+	case "MVP":
+		badgeColor = color.RGBA{212, 172, 13, 255}  // gold
+		label = "MVP"
+		textColor = color.RGBA{60, 40, 0, 255}
+	case "TOP_CORE":
+		badgeColor = color.RGBA{210, 105, 30, 255}  // orange
+		label = "CORE"
+		textColor = color.RGBA{255, 245, 230, 255}
+	case "TOP_SUPPORT":
+		badgeColor = color.RGBA{40, 110, 210, 255}  // blue
+		label = "SUPP"
+		textColor = color.RGBA{220, 235, 255, 255}
+	default:
+		return
+	}
+
+	// Ribbon (behind badge)
+	dc.SetColor(color.RGBA{180, 30, 30, 230})
+	dc.MoveTo(cx-3.5, cy+r*0.55)
+	dc.LineTo(cx-2, cy+r+4.5)
+	dc.LineTo(cx+0.5, cy+r*0.55)
+	dc.Fill()
+	dc.SetColor(color.RGBA{30, 60, 180, 230})
+	dc.MoveTo(cx-0.5, cy+r*0.55)
+	dc.LineTo(cx+2, cy+r+4.5)
+	dc.LineTo(cx+3.5, cy+r*0.55)
+	dc.Fill()
+
+	// Rosette petals
+	petalR := r * 0.38
+	for k := 0; k < petals; k++ {
+		angle := float64(k) * 2 * math.Pi / petals
+		px := cx + (r-petalR*0.4)*math.Cos(angle)
+		py := cy + (r-petalR*0.4)*math.Sin(angle)
+		dc.SetColor(badgeColor)
+		dc.DrawCircle(px, py, petalR)
+		dc.Fill()
+	}
+
+	// Main disc
+	dc.SetColor(badgeColor)
+	dc.DrawCircle(cx, cy, r*0.72)
+	dc.Fill()
+
+	// Star shape (for CORE/SUPPORT) or inner circle highlight (MVP)
+	if award == "MVP" {
+		dc.SetRGBA(1, 0.85, 0.2, 0.55)
+		dc.DrawCircle(cx, cy-1, r*0.38)
+		dc.Fill()
+	} else {
+		// Draw 5-point star
+		dc.SetColor(color.RGBA{255, 245, 200, 200})
+		starR := r * 0.42
+		innerR := starR * 0.45
+		path := make([][2]float64, 10)
+		for k := 0; k < 10; k++ {
+			angle := float64(k)*math.Pi/5 - math.Pi/2
+			rad := starR
+			if k%2 == 1 {
+				rad = innerR
+			}
+			path[k] = [2]float64{cx + rad*math.Cos(angle), cy + rad*math.Sin(angle)}
+		}
+		dc.MoveTo(path[0][0], path[0][1])
+		for k := 1; k < 10; k++ {
+			dc.LineTo(path[k][0], path[k][1])
+		}
+		dc.ClosePath()
+		dc.Fill()
+	}
+
+	// Label text
+	g.loadFont(dc, 5)
+	dc.SetColor(textColor)
+	dc.DrawStringAnchored(label, cx, cy+1, 0.5, 0.5)
 }
 
 // scaleImage scales src to dstW×dstH using bilinear interpolation.

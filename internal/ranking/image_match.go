@@ -8,6 +8,7 @@ import (
 	stdraw "image/draw"
 	_ "image/jpeg"
 	_ "image/png"
+	"math"
 	"strings"
 	"time"
 
@@ -459,10 +460,10 @@ func drawMatchPlayerRow(g *ImageGenerator, dc *gg.Context, p MatchPlayer, startX
 	}
 	dc.DrawStringAnchored(truncateStr(p.HeroName, 11), startX+8, cy, 0, 0.5)
 
-	// Award pill badge (dedicated column)
+	// Award icon (dedicated column, no text)
 	award := strings.ToUpper(p.Award)
 	if award != "" && award != "NONE" {
-		drawAwardPill(g, dc, award, startX+colW*0.31, cy)
+		drawAwardIcon(dc, award, startX+colW*0.31, cy)
 	}
 
 	// Player name
@@ -497,37 +498,97 @@ func drawMatchPlayerRow(g *ImageGenerator, dc *gg.Context, p MatchPlayer, startX
 	}
 }
 
-// drawAwardPill draws a colored pill badge (MVP/CORE/SUPPORT) centered at (cx, cy).
-func drawAwardPill(g *ImageGenerator, dc *gg.Context, award string, cx, cy float64) {
-	const pillW, pillH = 44.0, 15.0
-
-	var bgColor color.RGBA
-	var label string
-	var textColor color.RGBA
-
+// drawAwardIcon draws a graphical award icon (no text) centered at (cx, cy).
+func drawAwardIcon(dc *gg.Context, award string, cx, cy float64) {
 	switch award {
 	case "MVP":
-		bgColor = color.RGBA{212, 172, 13, 255}
-		label = "* MVP"
-		textColor = color.RGBA{40, 28, 0, 255}
+		drawStarIcon(dc, cx, cy, 10.0, color.RGBA{212, 172, 13, 255})
 	case "TOP_CORE":
-		bgColor = color.RGBA{210, 105, 30, 255}
-		label = "* CORE"
-		textColor = color.RGBA{255, 245, 225, 255}
+		drawDiamondIcon(dc, cx, cy, color.RGBA{40, 150, 235, 255})
 	case "TOP_SUPPORT":
-		bgColor = color.RGBA{40, 110, 210, 255}
-		label = "* SUPP"
-		textColor = color.RGBA{215, 232, 255, 255}
-	default:
-		return
+		drawAngelIcon(dc, cx, cy)
 	}
+}
 
-	dc.SetColor(bgColor)
-	dc.DrawRoundedRectangle(cx-pillW/2, cy-pillH/2, pillW, pillH, pillH/2)
+func drawStarIcon(dc *gg.Context, cx, cy, R float64, col color.RGBA) {
+	r := R * 0.42
+	for k := 0; k < 10; k++ {
+		angle := float64(k)*math.Pi/5 - math.Pi/2
+		rad := R
+		if k%2 == 1 {
+			rad = r
+		}
+		x := cx + rad*math.Cos(angle)
+		y := cy + rad*math.Sin(angle)
+		if k == 0 {
+			dc.MoveTo(x, y)
+		} else {
+			dc.LineTo(x, y)
+		}
+	}
+	dc.ClosePath()
+	dc.SetColor(col)
 	dc.Fill()
-	g.loadFont(dc, 8)
-	dc.SetColor(textColor)
-	dc.DrawStringAnchored(label, cx, cy+0.5, 0.5, 0.5)
+}
+
+func drawDiamondIcon(dc *gg.Context, cx, cy float64, col color.RGBA) {
+	hw, hh := 8.0, 10.0
+	// Main diamond
+	dc.MoveTo(cx, cy-hh)
+	dc.LineTo(cx+hw, cy)
+	dc.LineTo(cx, cy+hh)
+	dc.LineTo(cx-hw, cy)
+	dc.ClosePath()
+	dc.SetColor(col)
+	dc.Fill()
+	// Top-right facet highlight
+	dc.MoveTo(cx, cy-hh)
+	dc.LineTo(cx+hw, cy)
+	dc.LineTo(cx, cy)
+	dc.ClosePath()
+	dc.SetRGBA(1, 1, 1, 0.28)
+	dc.Fill()
+	// Bottom-left shadow
+	dc.MoveTo(cx, cy)
+	dc.LineTo(cx-hw, cy)
+	dc.LineTo(cx, cy+hh)
+	dc.ClosePath()
+	dc.SetRGBA(0, 0, 0, 0.18)
+	dc.Fill()
+}
+
+func drawAngelIcon(dc *gg.Context, cx, cy float64) {
+	wingCol := color.RGBA{170, 210, 255, 220}
+	// Left wing
+	dc.SetColor(wingCol)
+	dc.MoveTo(cx-1, cy-1)
+	dc.LineTo(cx-12, cy-5)
+	dc.LineTo(cx-9, cy+5)
+	dc.ClosePath()
+	dc.Fill()
+	// Right wing
+	dc.MoveTo(cx+1, cy-1)
+	dc.LineTo(cx+12, cy-5)
+	dc.LineTo(cx+9, cy+5)
+	dc.ClosePath()
+	dc.Fill()
+	// Body
+	dc.SetColor(color.RGBA{200, 220, 255, 200})
+	dc.MoveTo(cx, cy)
+	dc.LineTo(cx-3, cy+7)
+	dc.LineTo(cx+3, cy+7)
+	dc.ClosePath()
+	dc.Fill()
+	// Head
+	dc.SetColor(color.RGBA{255, 235, 210, 255})
+	dc.DrawCircle(cx, cy-5, 3.5)
+	dc.Fill()
+	// Halo (golden ellipse)
+	dc.SetColor(color.RGBA{255, 215, 40, 255})
+	dc.SetLineWidth(1.5)
+	dc.DrawEllipse(cx, cy-9.5, 4.5, 1.5)
+	dc.Stroke()
+	dc.SetLineWidth(1)
 }
 
 // laneOutcomeColor returns the display color for a raw Stratz lane outcome.

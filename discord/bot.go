@@ -185,6 +185,25 @@ func (b *Bot) registerCommands() error {
 				},
 				{
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "match",
+					Description: "Regenerar y publicar la imagen de una partida por ID",
+					Options: []*discordgo.ApplicationCommandOption{
+						{
+							Type:        discordgo.ApplicationCommandOptionInteger,
+							Name:        "id",
+							Description: "ID de la partida",
+							Required:    true,
+						},
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "account_id",
+							Description: "Dota 2 Account ID del jugador (auto-detecta si no se especifica)",
+							Required:    false,
+						},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
 					Name:        "help",
 					Description: "Mostrar ayuda",
 				},
@@ -315,6 +334,8 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 		b.handleStatsSlash(s, i)
 	case "queue":
 		b.handleQueueSlash(s, i)
+	case "match":
+		b.handleMatchSlash(s, i, subcommand)
 	case "help":
 		b.handleHelpSlash(s, i)
 	case "ranking", "rankings":
@@ -678,6 +699,112 @@ func (b *Bot) handleQueueSlash(s *discordgo.Session, i *discordgo.InteractionCre
 		Color:       0xF39C12,
 	}
 	b.sendFollowupEmbed(s, i, embed)
+}
+
+func (b *Bot) handleMatchSlash(s *discordgo.Session, i *discordgo.InteractionCreate, subcommand *discordgo.ApplicationCommandInteractionDataOption) {
+	if b.stratzClient == nil || !b.stratzClient.IsConfigured() {
+		b.sendFollowup(s, i, "❌ Stratz no está configurado.")
+		return
+	}
+
+	var matchID int64
+	var accountIDOpt string
+	for _, opt := range subcommand.Options {
+		switch opt.Name {
+		case "id":
+			matchID = opt.IntValue()
+		case "account_id":
+			accountIDOpt = opt.StringValue()
+		}
+	}
+	if matchID == 0 {
+		b.sendFollowup(s, i, "❌ ID de partida inválido.")
+		return
+	}
+
+	matchDetailsStratz, err := b.stratzClient.GetMatch(matchID)
+	if err != nil || matchDetailsStratz == nil {
+		b.sendFollowup(s, i, fmt.Sprintf("❌ No se pudo obtener partida %d de Stratz: %v", matchID, err))
+		return
+	}
+
+	matchDetails := dota.StratzMatchToMatchResponse(matchDetailsStratz)
+
+	var player *dota.Player
+	var accountID string
+
+	if accountIDOpt != "" {
+		accountIDInt, parseErr := strconv.ParseInt(accountIDOpt, 10, 64)
+		if parseErr != nil {
+			b.sendFollowup(s, i, "❌ account_id inválido.")
+			return
+		}
+		for j := range matchDetails.Players {
+			if matchDetails.Players[j].AccountID == int(accountIDInt) {
+				player = &matchDetails.Players[j]
+				accountID = accountIDOpt
+				break
+			}
+		}
+	} else {
+		// Auto-detectar jugador registrado en la partida
+		users := b.userStore.GetAll()
+		if len(users) == 0 && b.db != nil {
+			if dbUsers, dbErr := b.db.GetAllUsers(); dbErr == nil {
+				for _, u := range dbUsers {
+					if u.DiscordID != nil {
+						users[*u.DiscordID] = strconv.FormatInt(u.DotaID, 10)
+					}
+				}
+			}
+		}
+		for _, dotaIDStr := range users {
+			dotaIDInt, parseErr := strconv.ParseInt(dotaIDStr, 10, 64)
+			if parseErr != nil {
+				continue
+			}
+			for j := range matchDetails.Players {
+				if matchDetails.Players[j].AccountID == int(dotaIDInt) {
+					player = &matchDetails.Players[j]
+					accountID = dotaIDStr
+					break
+				}
+			}
+			if player != nil {
+				break
+			}
+		}
+	}
+
+	if player == nil {
+		b.sendFollowup(s, i, fmt.Sprintf("❌ No se encontró ningún jugador registrado en la partida %d. Especifica `account_id` manualmente.", matchID))
+		return
+	}
+
+	accountIDInt, _ := strconv.ParseInt(accountID, 10, 64)
+	stratzProfile, _ := b.stratzClient.GetPlayerProfile(accountIDInt)
+	var profile *dota.PlayersResponse
+	if stratzProfile != nil {
+		profile = &dota.PlayersResponse{}
+		profile.Profile.Personaname = stratzProfile.Name
+		profile.Profile.Avatarfull = stratzProfile.Avatar
+	}
+
+	channelID, chErr := b.userStore.GetChannel()
+	if chErr != nil || channelID == "" {
+		channelID = b.config.NotificationChannelID
+	}
+	if channelID == "" {
+		b.sendFollowup(s, i, "❌ No hay canal de notificaciones configurado.")
+		return
+	}
+
+	if notifErr := b.sendMatchNotification(channelID, matchDetails, player, profile, accountID); notifErr != nil {
+		b.sendFollowup(s, i, fmt.Sprintf("❌ Error publicando partida: %v", notifErr))
+		return
+	}
+
+	b.sendFollowup(s, i, fmt.Sprintf("✅ Partida **%d** publicada en <#%s>", matchID, channelID))
 }
 
 func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {

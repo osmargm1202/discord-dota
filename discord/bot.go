@@ -799,7 +799,7 @@ func (b *Bot) handleMatchSlash(s *discordgo.Session, i *discordgo.InteractionCre
 		return
 	}
 
-	if notifErr := b.sendMatchNotification(channelID, matchDetails, player, profile, accountID); notifErr != nil {
+	if notifErr := b.sendMatchNotification(channelID, matchDetails, player, profile, accountID, true); notifErr != nil {
 		b.sendFollowup(s, i, fmt.Sprintf("❌ Error publicando partida: %v", notifErr))
 		return
 	}
@@ -1781,7 +1781,7 @@ func (b *Bot) buildLaneOutcomeText(match *dota.MatchResponse, player *dota.Playe
 	return laneResult, laneSummary
 }
 
-func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse, player *dota.Player, profile *dota.PlayersResponse, accountID string) error {
+func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse, player *dota.Player, profile *dota.PlayersResponse, accountID string, forceNewKey ...bool) error {
 	// Determinar resultado (RadiantWin + IsRadiant)
 	isWin := false
 	if match.RadiantWin != nil && player.IsRadiant != nil {
@@ -2290,6 +2290,9 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		} else if b.minioClient != nil {
 			// Prod: upload to MinIO, send URL embed + Stratz link
 			key := fmt.Sprintf("match-notifications/match-%d-%s.png", match.MatchID, accountID)
+			if len(forceNewKey) > 0 && forceNewKey[0] {
+				key = fmt.Sprintf("match-notifications/match-%d-%s-%d.png", match.MatchID, accountID, time.Now().Unix())
+			}
 			imgURL, upErr := b.minioClient.Upload(context.Background(), key, imgBytes)
 			if upErr != nil {
 				getLogger().Warnf("upload match PNG: %v — sending as attachment", upErr)

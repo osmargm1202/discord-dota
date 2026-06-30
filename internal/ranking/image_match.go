@@ -24,9 +24,10 @@ type MatchPlayer struct {
 	WinRate    float64 // -1 = unknown
 	Wins       int
 	Losses     int
-	IMP        int    // Individual Match Performance from Stratz (0 = not available)
-	ShowIMP    bool   // true when Stratz returned a non-zero IMP
-	Award      string // "MVP", "TOP_CORE", "TOP_SUPPORT", "NONE" or ""
+	IMP          int    // Individual Match Performance from Stratz (0 = not available)
+	ShowIMP      bool   // true when Stratz returned a non-zero IMP
+	Award        string // "MVP", "TOP_CORE", "TOP_SUPPORT", "NONE" or ""
+	HeroImgBytes []byte // small hero portrait for the row thumbnail
 }
 
 // MatchRenderData holds all display data for a match notification PNG.
@@ -451,6 +452,22 @@ func drawMatchPlayerRow(g *ImageGenerator, dc *gg.Context, p MatchPlayer, startX
 		dc.Stroke()
 	}
 
+	// Hero portrait thumbnail (26×26)
+	const thumbSize = 26.0
+	thumbX := startX + 2
+	thumbY := cy - thumbSize/2
+	if len(p.HeroImgBytes) > 0 {
+		if heroImg, _, err := image.Decode(bytes.NewReader(p.HeroImgBytes)); err == nil {
+			scaled := scaleToSquare(heroImg, int(thumbSize), int(thumbSize))
+			dc.DrawImage(scaled, int(thumbX), int(thumbY))
+		}
+	} else {
+		// Fallback: colored placeholder
+		dc.SetColor(color.RGBA{60, 60, 60, 200})
+		dc.DrawRectangle(thumbX, thumbY, thumbSize, thumbSize)
+		dc.Fill()
+	}
+
 	// Hero name
 	g.loadFont(dc, 12)
 	if p.IsMain {
@@ -458,7 +475,7 @@ func drawMatchPlayerRow(g *ImageGenerator, dc *gg.Context, p MatchPlayer, startX
 	} else {
 		dc.SetColor(colorWhite)
 	}
-	dc.DrawStringAnchored(truncateStr(p.HeroName, 11), startX+8, cy, 0, 0.5)
+	dc.DrawStringAnchored(truncateStr(p.HeroName, 10), startX+32, cy, 0, 0.5)
 
 	// Award icon (dedicated column, no text)
 	award := strings.ToUpper(p.Award)

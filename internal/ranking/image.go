@@ -20,7 +20,7 @@ func decodeImage(data []byte) (image.Image, string, error) {
 }
 
 const (
-	canvasW  = 820.0
+	canvasW  = 900.0
 	rowH     = 50.0
 	headerH  = 68.0
 	sectionH = 32.0

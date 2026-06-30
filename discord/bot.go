@@ -2187,6 +2187,17 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 			mp.ShowIMP = true
 		}
 		mp.Award = p.Award
+		// Hero thumbnail for the row
+		heroURL := b.dotaClient.GetHeroImageURL(p.HeroID)
+		if heroURL == "" {
+			heroURL = dota.GetHeroImageURLStratz(p.HeroID)
+		}
+		heroKey := fmt.Sprintf("assets/heroes/%d.png", p.HeroID)
+		if b.minioClient != nil && heroURL != "" {
+			mp.HeroImgBytes, _ = b.minioClient.GetOrFetchAsset(context.Background(), heroKey, heroURL)
+		} else if heroURL != "" {
+			mp.HeroImgBytes, _ = fetchImageBytes(heroURL)
+		}
 		if vp, ok := verifiedByAccountID[p.AccountID]; ok {
 			mp.PlayerName = vp.PlayerName
 			if vp.WinLoss != nil {

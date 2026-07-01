@@ -2227,6 +2227,37 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		direMatchPlayers = append(direMatchPlayers, buildMatchPlayer(p, p.AccountID == player.AccountID))
 	}
 
+	// Calculate LVP: player with lowest IMP who has no Stratz award
+	allMatchPlayers := make([]*ranking.MatchPlayer, 0, len(radiantMatchPlayers)+len(direMatchPlayers))
+	for i := range radiantMatchPlayers {
+		allMatchPlayers = append(allMatchPlayers, &radiantMatchPlayers[i])
+	}
+	for i := range direMatchPlayers {
+		allMatchPlayers = append(allMatchPlayers, &direMatchPlayers[i])
+	}
+	hasAnyIMP := false
+	for _, mp := range allMatchPlayers {
+		if mp.ShowIMP {
+			hasAnyIMP = true
+			break
+		}
+	}
+	if hasAnyIMP {
+		var lvpIdx int
+		minIMP := allMatchPlayers[0].IMP
+		for i, mp := range allMatchPlayers {
+			if mp.IMP < minIMP {
+				minIMP = mp.IMP
+				lvpIdx = i
+			}
+		}
+		// Only assign LVP if they don't already have a Stratz award
+		lvp := allMatchPlayers[lvpIdx]
+		if lvp.Award == "" || strings.ToUpper(lvp.Award) == "NONE" {
+			lvp.Award = "LVP"
+		}
+	}
+
 	// Build notification header visible in Discord previews (no need to open image)
 	resultEmoji := "✅"
 	resultLabel := "Victoria"

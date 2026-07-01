@@ -524,6 +524,8 @@ func drawAwardIcon(dc *gg.Context, award string, cx, cy float64) {
 		drawDiamondIcon(dc, cx, cy, color.RGBA{40, 150, 235, 255})
 	case "TOP_SUPPORT":
 		drawAngelIcon(dc, cx, cy)
+	case "LVP":
+		drawSkullIcon(dc, cx, cy)
 	}
 }
 
@@ -606,6 +608,38 @@ func drawAngelIcon(dc *gg.Context, cx, cy float64) {
 	dc.DrawEllipse(cx, cy-9.5, 4.5, 1.5)
 	dc.Stroke()
 	dc.SetLineWidth(1)
+}
+
+func drawSkullIcon(dc *gg.Context, cx, cy float64) {
+	r := 9.0
+	// Head
+	dc.SetColor(color.RGBA{180, 180, 180, 255})
+	dc.DrawCircle(cx, cy-r*0.08, r)
+	dc.Fill()
+	// Eyes
+	eyeR := r * 0.28
+	dc.SetColor(color.RGBA{30, 30, 30, 255})
+	dc.DrawCircle(cx-r*0.32, cy-r*0.18, eyeR)
+	dc.Fill()
+	dc.DrawCircle(cx+r*0.32, cy-r*0.18, eyeR)
+	dc.Fill()
+	// Nose
+	dc.DrawCircle(cx, cy+r*0.1, r*0.13)
+	dc.Fill()
+	// Jaw background
+	teethY := cy + r*0.62
+	teethW := r * 1.1
+	teethH := r * 0.38
+	dc.DrawRectangle(cx-teethW/2, teethY-teethH/2, teethW, teethH)
+	dc.Fill()
+	// Tooth gaps
+	dc.SetColor(color.RGBA{180, 180, 180, 255})
+	tw := teethW / 5.0
+	for i := 1; i < 5; i++ {
+		x := cx - teethW/2 + float64(i)*tw
+		dc.DrawRectangle(x-0.8, teethY-teethH/2, 1.6, teethH)
+		dc.Fill()
+	}
 }
 
 // laneOutcomeColor returns the display color for a raw Stratz lane outcome.

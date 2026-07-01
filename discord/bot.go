@@ -2251,9 +2251,9 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 				lvpIdx = i
 			}
 		}
-		// Only assign LVP if they don't already have a Stratz award
+		// Only assign LVP if IMP <= -35 and no Stratz award
 		lvp := allMatchPlayers[lvpIdx]
-		if lvp.Award == "" || strings.ToUpper(lvp.Award) == "NONE" {
+		if minIMP <= -35 && (lvp.Award == "" || strings.ToUpper(lvp.Award) == "NONE") {
 			lvp.Award = "LVP"
 		}
 	}

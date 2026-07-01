@@ -117,7 +117,7 @@ func (s *Service) storeMatch(dotaID int64, m dota.BackfillMatch) error {
 	}
 
 	startTime := time.Unix(m.StartDateTime, 0).UTC()
-	if err := s.db.UpsertMatch(m.ID, startTime, m.DurationSecs, int(m.GameMode), m.DidRadiantWin, false); err != nil {
+	if err := s.db.UpsertMatch(m.ID, startTime, m.DurationSecs, int(m.GameMode), m.DidRadiantWin, false, "", "", ""); err != nil {
 		return fmt.Errorf("upsert match: %w", err)
 	}
 

@@ -826,14 +826,25 @@ func AnalyzeStreakFromStratzMatches(matches []StratzMatch, steamAccountID int64)
 
 // IsMatchParsed indica si la partida está parseada según la API (MatchType.parsedDateTime).
 // Si parsedDateTime es null o 0, la partida no está parseada.
+// IsMatchParsed returns true only when parsedDateTime is set AND actual parsed
+// data (lane outcomes, player lanes) is present. Stratz sometimes sets
+// parsedDateTime before the detailed data propagates.
 func IsMatchParsed(m *StratzMatch) bool {
 	if m == nil {
 		return false
 	}
-	if m.ParsedDateTime == nil {
+	if m.ParsedDateTime == nil || *m.ParsedDateTime <= 0 {
 		return false
 	}
-	return *m.ParsedDateTime > 0
+	if m.TopLaneOutcome == "" {
+		return false
+	}
+	for _, p := range m.Players {
+		if p.Lane != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // RequestParseMatch solicita el parse de una partida en Stratz (si la API expone la mutación)

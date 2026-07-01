@@ -133,12 +133,13 @@ type colDef struct {
 var indivCols = []colDef{
 	{"#", 22, 0.5},
 	{"JUGADOR", 70, 0},
-	{"T", 390, 0.5},
-	{"G", 435, 0.5},
-	{"P", 478, 0.5},
-	{"WIN%", 533, 0.5},
-	{"+/-", 595, 0.5},
-	{"~MMR", 678, 0.5},
+	{"T", 370, 0.5},
+	{"G", 413, 0.5},
+	{"P", 455, 0.5},
+	{"WIN%", 507, 0.5},
+	{"+/-", 562, 0.5},
+	{"~MMR", 630, 0.5},
+	{"LINEA (G-E-P)", 790, 0.5},
 }
 
 var teamCols = []colDef{
@@ -212,20 +213,43 @@ func (g *ImageGenerator) drawIndivRow(dc *gg.Context, y float64, idx int, r Play
 	dc.SetColor(colorWhite)
 	dc.DrawStringAnchored(r.DisplayName, 82, y+rowH/2, 0, 0.5)
 
-	// stats
+	// match stats
 	total := r.Wins + r.Losses
 	dc.SetColor(colorGray)
-	dc.DrawStringAnchored(fmt.Sprintf("%d", total), 390, y+rowH/2, 0.5, 0.5)
+	dc.DrawStringAnchored(fmt.Sprintf("%d", total), 370, y+rowH/2, 0.5, 0.5)
 	dc.SetColor(colorGreen)
-	dc.DrawStringAnchored(fmt.Sprintf("%d", r.Wins), 435, y+rowH/2, 0.5, 0.5)
+	dc.DrawStringAnchored(fmt.Sprintf("%d", r.Wins), 413, y+rowH/2, 0.5, 0.5)
 	dc.SetColor(colorRed)
-	dc.DrawStringAnchored(fmt.Sprintf("%d", r.Losses), 478, y+rowH/2, 0.5, 0.5)
+	dc.DrawStringAnchored(fmt.Sprintf("%d", r.Losses), 455, y+rowH/2, 0.5, 0.5)
 	dc.SetColor(winPctColor(r.WinPct))
-	dc.DrawStringAnchored(fmt.Sprintf("%.0f%%", r.WinPct), 533, y+rowH/2, 0.5, 0.5)
+	dc.DrawStringAnchored(fmt.Sprintf("%.0f%%", r.WinPct), 507, y+rowH/2, 0.5, 0.5)
 	dc.SetColor(signColor(r.Net))
-	dc.DrawStringAnchored(signStr(r.Net), 595, y+rowH/2, 0.5, 0.5)
+	dc.DrawStringAnchored(signStr(r.Net), 562, y+rowH/2, 0.5, 0.5)
 	dc.SetColor(signColor(r.MMRTotal))
-	dc.DrawStringAnchored("~"+signStr(r.MMRTotal), 678, y+rowH/2, 0.5, 0.5)
+	dc.DrawStringAnchored("~"+signStr(r.MMRTotal), 630, y+rowH/2, 0.5, 0.5)
+
+	// Lane phase record (all-time): G-E-P format + unknown count
+	laneTotal := r.LaneW + r.LaneD + r.LaneL + r.LaneUnk
+	if laneTotal > 0 {
+		g.loadFont(dc, 11)
+		laneStr := fmt.Sprintf("%d-%d-%d", r.LaneW, r.LaneD, r.LaneL)
+		if r.LaneUnk > 0 {
+			laneStr += fmt.Sprintf(" (?%d)", r.LaneUnk)
+		}
+		switch {
+		case r.LaneW > r.LaneL:
+			dc.SetColor(colorGreen)
+		case r.LaneL > r.LaneW:
+			dc.SetColor(colorRed)
+		default:
+			dc.SetColor(colorGray)
+		}
+		dc.DrawStringAnchored(laneStr, 790, y+rowH/2, 0.5, 0.5)
+	} else {
+		g.loadFont(dc, 11)
+		dc.SetColor(colorGray)
+		dc.DrawStringAnchored("—", 790, y+rowH/2, 0.5, 0.5)
+	}
 }
 
 func (g *ImageGenerator) drawTeam2Row(dc *gg.Context, y float64, idx int, r Team2Row) {

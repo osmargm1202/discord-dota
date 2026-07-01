@@ -1464,7 +1464,8 @@ func (b *Bot) storeNewMatchToDB(m *dota.StratzMatch, p *dota.StratzPlayer, dotaI
 		return
 	}
 	startTime := time.Unix(m.StartDateTime, 0).UTC()
-	if err := b.db.UpsertMatch(m.ID, startTime, m.DurationSeconds, int(m.GameMode), m.DidRadiantWin, true); err != nil {
+	if err := b.db.UpsertMatch(m.ID, startTime, m.DurationSeconds, int(m.GameMode), m.DidRadiantWin, true,
+		m.TopLaneOutcome, m.MidLaneOutcome, m.BottomLaneOutcome); err != nil {
 		getLogger().Warnf("storeNewMatch: upsert match %d: %v", m.ID, err)
 		return
 	}
@@ -1497,6 +1498,11 @@ func (b *Bot) storeNewMatchToDB(m *dota.StratzMatch, p *dota.StratzPlayer, dotaI
 		getLogger().Warnf("storeNewMatch: upsert player_match %d/%d: %v", m.ID, dotaID, err)
 	} else {
 		getLogger().Infof("storeNewMatch: saved match %d for dota_id=%d", m.ID, dotaID)
+		if b.db != nil {
+			if err := b.db.RefreshLaneRecords([]int64{dotaID}); err != nil {
+				getLogger().Warnf("storeNewMatch: refresh lane records dota_id=%d: %v", dotaID, err)
+			}
+		}
 	}
 }
 

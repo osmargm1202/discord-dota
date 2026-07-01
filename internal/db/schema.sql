@@ -71,3 +71,18 @@ CREATE TABLE IF NOT EXISTS config (
 CREATE INDEX IF NOT EXISTS idx_player_matches_dota_id ON player_matches(dota_id);
 CREATE INDEX IF NOT EXISTS idx_player_matches_created_at ON player_matches(created_at);
 CREATE INDEX IF NOT EXISTS idx_matches_start_time ON matches(start_time);
+
+-- Lane outcome columns (added after initial schema; ADD COLUMN IF NOT EXISTS is idempotent)
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS top_lane_outcome    VARCHAR(20);
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS mid_lane_outcome    VARCHAR(20);
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS bottom_lane_outcome VARCHAR(20);
+
+-- All-time lane phase record per player (recomputed on demand)
+CREATE TABLE IF NOT EXISTS lane_records (
+    dota_id    BIGINT PRIMARY KEY,
+    wins       INT NOT NULL DEFAULT 0,
+    draws      INT NOT NULL DEFAULT 0,
+    losses     INT NOT NULL DEFAULT 0,
+    unknown    INT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);

@@ -44,6 +44,11 @@ type PlayerRankRow struct {
 	WinPct      float64
 	MMRTotal    int
 	AvatarBytes []byte // optional: PNG/JPEG avatar image
+	// All-time lane phase record
+	LaneW   int
+	LaneD   int
+	LaneL   int
+	LaneUnk int
 }
 
 // Team2Row holds ranking data for a 2-player combo.
@@ -89,16 +94,21 @@ func (c *Calculator) IndividualRanking(start, end time.Time) ([]PlayerRankRow, e
 		  u.dota_id,
 		  u.discord_id,
 		  COALESCE(u.display_name, 'Jugador') AS display_name,
-		  COUNT(*) FILTER (WHERE pm.won)       AS wins,
-		  COUNT(*) FILTER (WHERE NOT pm.won)   AS losses,
+		  COUNT(*) FILTER (WHERE pm.won)     AS wins,
+		  COUNT(*) FILTER (WHERE NOT pm.won) AS losses,
 		  COUNT(*) FILTER (WHERE pm.won) - COUNT(*) FILTER (WHERE NOT pm.won) AS net,
-		  COALESCE(SUM(pm.mmr_delta), 0)       AS mmr_total
+		  COALESCE(SUM(pm.mmr_delta), 0)     AS mmr_total,
+		  COALESCE(lr.wins,    0) AS lane_w,
+		  COALESCE(lr.draws,   0) AS lane_d,
+		  COALESCE(lr.losses,  0) AS lane_l,
+		  COALESCE(lr.unknown, 0) AS lane_unk
 		FROM player_matches pm
-		JOIN matches m ON m.match_id = pm.match_id
-		JOIN users u   ON u.dota_id  = pm.dota_id
+		JOIN matches m    ON m.match_id = pm.match_id
+		JOIN users u      ON u.dota_id  = pm.dota_id
+		LEFT JOIN lane_records lr ON lr.dota_id = u.dota_id
 		WHERE m.start_time >= $1 AND m.start_time < $2
 		  AND u.active = true
-		GROUP BY u.dota_id, u.discord_id, u.display_name
+		GROUP BY u.dota_id, u.discord_id, u.display_name, lr.wins, lr.draws, lr.losses, lr.unknown
 		ORDER BY net DESC, mmr_total DESC
 	`, start, end)
 	if err != nil {
@@ -110,7 +120,8 @@ func (c *Calculator) IndividualRanking(start, end time.Time) ([]PlayerRankRow, e
 	for rows.Next() {
 		var r PlayerRankRow
 		if err := rows.Scan(&r.DotaID, &r.DiscordID, &r.DisplayName,
-			&r.Wins, &r.Losses, &r.Net, &r.MMRTotal); err != nil {
+			&r.Wins, &r.Losses, &r.Net, &r.MMRTotal,
+			&r.LaneW, &r.LaneD, &r.LaneL, &r.LaneUnk); err != nil {
 			return nil, err
 		}
 		if total := r.Wins + r.Losses; total > 0 {

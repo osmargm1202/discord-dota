@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // ---- Users ----
@@ -63,12 +65,17 @@ func (d *DB) GetUserByDiscordID(discordID string) (*User, error) {
 
 // ---- Matches ----
 
-func (d *DB) UpsertMatch(matchID int64, startTime time.Time, durationSecs, gameMode int, radiantWin, parsed bool) error {
+func (d *DB) UpsertMatch(matchID int64, startTime time.Time, durationSecs, gameMode int, radiantWin, parsed bool, topLane, midLane, botLane string) error {
 	_, err := d.Exec(`
-		INSERT INTO matches (match_id, start_time, duration_secs, game_mode, radiant_win, parsed)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (match_id) DO UPDATE SET parsed = EXCLUDED.parsed
-	`, matchID, startTime, durationSecs, gameMode, radiantWin, parsed)
+		INSERT INTO matches (match_id, start_time, duration_secs, game_mode, radiant_win, parsed,
+		                     top_lane_outcome, mid_lane_outcome, bottom_lane_outcome)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (match_id) DO UPDATE SET
+		    parsed              = EXCLUDED.parsed,
+		    top_lane_outcome    = COALESCE(NULLIF(EXCLUDED.top_lane_outcome,''),    matches.top_lane_outcome),
+		    mid_lane_outcome    = COALESCE(NULLIF(EXCLUDED.mid_lane_outcome,''),    matches.mid_lane_outcome),
+		    bottom_lane_outcome = COALESCE(NULLIF(EXCLUDED.bottom_lane_outcome,''), matches.bottom_lane_outcome)
+	`, matchID, startTime, durationSecs, gameMode, radiantWin, parsed, topLane, midLane, botLane)
 	return err
 }
 
@@ -277,4 +284,83 @@ func (d *DB) MigrateFromJSON(
 	}
 
 	return d.SetConfig("json_migration_done", "true")
+}
+
+// ---- Lane records ----
+
+// LaneRecord holds all-time lane phase stats for one player.
+type LaneRecord struct {
+	DotaID  int64
+	Wins    int
+	Draws   int
+	Losses  int
+	Unknown int
+}
+
+// RefreshLaneRecords recomputes lane phase win/draw/loss/unknown for the given
+// dota IDs from the player_matches + matches join. Safe to call repeatedly.
+func (d *DB) RefreshLaneRecords(dotaIDs []int64) error {
+	if len(dotaIDs) == 0 {
+		return nil
+	}
+	_, err := d.Exec(`
+		WITH lane_data AS (
+		    SELECT
+		        pm.dota_id,
+		        pm.is_radiant,
+		        CASE
+		            WHEN pm.lane = 'SAFE_LANE' AND     pm.is_radiant THEN m.bottom_lane_outcome
+		            WHEN pm.lane = 'SAFE_LANE' AND NOT pm.is_radiant THEN m.top_lane_outcome
+		            WHEN pm.lane = 'MID_LANE'                        THEN m.mid_lane_outcome
+		            WHEN pm.lane = 'OFF_LANE' AND     pm.is_radiant  THEN m.top_lane_outcome
+		            WHEN pm.lane = 'OFF_LANE' AND NOT pm.is_radiant  THEN m.bottom_lane_outcome
+		            ELSE NULL
+		        END AS lane_outcome
+		    FROM player_matches pm
+		    JOIN matches m ON m.match_id = pm.match_id
+		    WHERE pm.dota_id = ANY($1)
+		)
+		INSERT INTO lane_records (dota_id, wins, draws, losses, unknown, updated_at)
+		SELECT
+		    dota_id,
+		    COUNT(*) FILTER (WHERE
+		        (lane_outcome IN ('RADIANT_VICTORY','RADIANT_STOMP') AND     is_radiant) OR
+		        (lane_outcome IN ('DIRE_VICTORY',   'DIRE_STOMP')    AND NOT is_radiant)
+		    ) AS wins,
+		    COUNT(*) FILTER (WHERE lane_outcome = 'TIE') AS draws,
+		    COUNT(*) FILTER (WHERE
+		        (lane_outcome IN ('DIRE_VICTORY',   'DIRE_STOMP')    AND     is_radiant) OR
+		        (lane_outcome IN ('RADIANT_VICTORY','RADIANT_STOMP') AND NOT is_radiant)
+		    ) AS losses,
+		    COUNT(*) FILTER (WHERE lane_outcome IS NULL OR lane_outcome = '') AS unknown,
+		    NOW()
+		FROM lane_data
+		GROUP BY dota_id
+		ON CONFLICT (dota_id) DO UPDATE SET
+		    wins       = EXCLUDED.wins,
+		    draws      = EXCLUDED.draws,
+		    losses     = EXCLUDED.losses,
+		    unknown    = EXCLUDED.unknown,
+		    updated_at = NOW()
+	`, pq.Array(dotaIDs))
+	return err
+}
+
+// GetAllLaneRecords returns lane phase records for all players.
+func (d *DB) GetAllLaneRecords() (map[int64]LaneRecord, error) {
+	rows, err := d.Query(`SELECT dota_id, wins, draws, losses, unknown FROM lane_records`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[int64]LaneRecord)
+	for rows.Next() {
+		var r LaneRecord
+		if err := rows.Scan(&r.DotaID, &r.Wins, &r.Draws, &r.Losses, &r.Unknown); err != nil {
+			return nil, err
+		}
+		result[r.DotaID] = r
+	}
+	return result, rows.Err()
+}
 }

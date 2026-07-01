@@ -37,12 +37,20 @@ func (s *Service) Run() {
 		return
 	}
 
+	var dotaIDs []int64
 	for _, u := range users {
 		logrus.Infof("backfill: processing dota_id %d", u.DotaID)
 		if err := s.backfillUser(u.DotaID, afterUnix); err != nil {
 			logrus.Errorf("backfill: dota_id %d: %v", u.DotaID, err)
 		}
 		s.updateDisplayName(u.DotaID)
+		dotaIDs = append(dotaIDs, u.DotaID)
+	}
+	if len(dotaIDs) > 0 {
+		logrus.Info("backfill: refreshing lane records for all users")
+		if err := s.db.RefreshLaneRecords(dotaIDs); err != nil {
+			logrus.Errorf("backfill: refresh lane records: %v", err)
+		}
 	}
 	logrus.Info("backfill: complete")
 }
@@ -55,6 +63,9 @@ func (s *Service) RunForUser(dotaID int64) {
 		logrus.Errorf("backfill: dota_id %d: %v", dotaID, err)
 	}
 	s.updateDisplayName(dotaID)
+	if err := s.db.RefreshLaneRecords([]int64{dotaID}); err != nil {
+		logrus.Errorf("backfill: refresh lane records dota_id %d: %v", dotaID, err)
+	}
 }
 
 // updateDisplayName fetches name from Stratz and updates the DB if still default.
@@ -117,7 +128,7 @@ func (s *Service) storeMatch(dotaID int64, m dota.BackfillMatch) error {
 	}
 
 	startTime := time.Unix(m.StartDateTime, 0).UTC()
-	if err := s.db.UpsertMatch(m.ID, startTime, m.DurationSecs, int(m.GameMode), m.DidRadiantWin, false, "", "", ""); err != nil {
+	if err := s.db.UpsertMatch(m.ID, startTime, m.DurationSecs, int(m.GameMode), m.DidRadiantWin, false, m.TopLaneOutcome, m.MidLaneOutcome, m.BottomLaneOutcome); err != nil {
 		return fmt.Errorf("upsert match: %w", err)
 	}
 

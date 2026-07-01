@@ -869,12 +869,15 @@ func (c *StratzClient) RequestParseMatch(matchID int64) error {
 
 // BackfillMatch is a lightweight match record for historical ingestion.
 type BackfillMatch struct {
-	ID            int64
-	DidRadiantWin bool
-	DurationSecs  int
-	StartDateTime int64
-	GameMode      stratzIntOrStr
-	Players       []BackfillPlayer
+	ID                int64
+	DidRadiantWin     bool
+	DurationSecs      int
+	StartDateTime     int64
+	GameMode          stratzIntOrStr
+	TopLaneOutcome    string
+	MidLaneOutcome    string
+	BottomLaneOutcome string
+	Players           []BackfillPlayer
 }
 
 // BackfillPlayer has ranking-relevant fields only.
@@ -909,6 +912,9 @@ func (c *StratzClient) GetPlayerMatchesForBackfill(steamAccountID int64, take, s
 					durationSeconds
 					startDateTime
 					gameMode
+					topLaneOutcome
+					midLaneOutcome
+					bottomLaneOutcome
 					players {
 						steamAccountId
 						isRadiant
@@ -934,12 +940,15 @@ func (c *StratzClient) GetPlayerMatchesForBackfill(steamAccountID int64, take, s
 	var result struct {
 		Player struct {
 			Matches []struct {
-				ID            int64            `json:"id"`
-				DidRadiantWin bool             `json:"didRadiantWin"`
-				DurationSecs  int              `json:"durationSeconds"`
-				StartDateTime int64            `json:"startDateTime"`
-				GameMode      stratzIntOrStr   `json:"gameMode"`
-				Players       []BackfillPlayer `json:"players"`
+				ID                int64            `json:"id"`
+				DidRadiantWin     bool             `json:"didRadiantWin"`
+				DurationSecs      int              `json:"durationSeconds"`
+				StartDateTime     int64            `json:"startDateTime"`
+				GameMode          stratzIntOrStr   `json:"gameMode"`
+				TopLaneOutcome    string           `json:"topLaneOutcome"`
+				MidLaneOutcome    string           `json:"midLaneOutcome"`
+				BottomLaneOutcome string           `json:"bottomLaneOutcome"`
+				Players           []BackfillPlayer `json:"players"`
 			} `json:"matches"`
 		} `json:"player"`
 	}
@@ -954,12 +963,15 @@ func (c *StratzClient) GetPlayerMatchesForBackfill(steamAccountID int64, take, s
 	out := make([]BackfillMatch, len(result.Player.Matches))
 	for i, m := range result.Player.Matches {
 		out[i] = BackfillMatch{
-			ID:            m.ID,
-			DidRadiantWin: m.DidRadiantWin,
-			DurationSecs:  m.DurationSecs,
-			StartDateTime: m.StartDateTime,
-			GameMode:      m.GameMode,
-			Players:       m.Players,
+			ID:                m.ID,
+			DidRadiantWin:     m.DidRadiantWin,
+			DurationSecs:      m.DurationSecs,
+			StartDateTime:     m.StartDateTime,
+			GameMode:          m.GameMode,
+			TopLaneOutcome:    m.TopLaneOutcome,
+			MidLaneOutcome:    m.MidLaneOutcome,
+			BottomLaneOutcome: m.BottomLaneOutcome,
+			Players:           m.Players,
 		}
 	}
 	return out, nil

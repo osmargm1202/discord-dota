@@ -363,4 +363,3 @@ func (d *DB) GetAllLaneRecords() (map[int64]LaneRecord, error) {
 	}
 	return result, rows.Err()
 }
-}

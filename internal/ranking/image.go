@@ -20,7 +20,7 @@ func decodeImage(data []byte) (image.Image, string, error) {
 }
 
 const (
-	canvasW  = 900.0
+	canvasW  = 1020.0
 	rowH     = 50.0
 	headerH  = 68.0
 	sectionH = 32.0
@@ -139,7 +139,8 @@ var indivCols = []colDef{
 	{"WIN%", 507, 0.5},
 	{"+/-", 562, 0.5},
 	{"~MMR", 630, 0.5},
-	{"LINEA (G-E-P)", 790, 0.5},
+	{"LINEA (G-E-P)", 770, 0.5},
+	{"%LINEA", 930, 0.5},
 }
 
 var teamCols = []colDef{
@@ -228,10 +229,11 @@ func (g *ImageGenerator) drawIndivRow(dc *gg.Context, y float64, idx int, r Play
 	dc.SetColor(signColor(r.MMRTotal))
 	dc.DrawStringAnchored("~"+signStr(r.MMRTotal), 630, y+rowH/2, 0.5, 0.5)
 
-	// Lane phase record (all-time): G-E-P format + unknown count
-	laneTotal := r.LaneW + r.LaneD + r.LaneL + r.LaneUnk
+	// Lane phase record (all-time): G-E-P counts + unknown, then % of known only
+	g.loadFont(dc, 11)
+	laneKnown := r.LaneW + r.LaneD + r.LaneL
+	laneTotal := laneKnown + r.LaneUnk
 	if laneTotal > 0 {
-		g.loadFont(dc, 11)
 		laneStr := fmt.Sprintf("%d-%d-%d", r.LaneW, r.LaneD, r.LaneL)
 		if r.LaneUnk > 0 {
 			laneStr += fmt.Sprintf(" (?%d)", r.LaneUnk)
@@ -244,11 +246,31 @@ func (g *ImageGenerator) drawIndivRow(dc *gg.Context, y float64, idx int, r Play
 		default:
 			dc.SetColor(colorGray)
 		}
-		dc.DrawStringAnchored(laneStr, 790, y+rowH/2, 0.5, 0.5)
+		dc.DrawStringAnchored(laneStr, 770, y+rowH/2, 0.5, 0.5)
+
+		// % column: only known matches
+		if laneKnown > 0 {
+			wPct := float64(r.LaneW) / float64(laneKnown) * 100
+			dPct := float64(r.LaneD) / float64(laneKnown) * 100
+			lPct := float64(r.LaneL) / float64(laneKnown) * 100
+			pctStr := fmt.Sprintf("%.0f%%-%.0f%%-%.0f%%", wPct, dPct, lPct)
+			switch {
+			case r.LaneW > r.LaneL:
+				dc.SetColor(colorGreen)
+			case r.LaneL > r.LaneW:
+				dc.SetColor(colorRed)
+			default:
+				dc.SetColor(colorGray)
+			}
+			dc.DrawStringAnchored(pctStr, 930, y+rowH/2, 0.5, 0.5)
+		} else {
+			dc.SetColor(colorGray)
+			dc.DrawStringAnchored("—", 930, y+rowH/2, 0.5, 0.5)
+		}
 	} else {
-		g.loadFont(dc, 11)
 		dc.SetColor(colorGray)
-		dc.DrawStringAnchored("—", 790, y+rowH/2, 0.5, 0.5)
+		dc.DrawStringAnchored("—", 770, y+rowH/2, 0.5, 0.5)
+		dc.DrawStringAnchored("—", 930, y+rowH/2, 0.5, 0.5)
 	}
 }
 

@@ -119,17 +119,18 @@ func (s *Service) backfillUser(dotaID int64, afterUnix int64) error {
 }
 
 func (s *Service) storeMatch(dotaID int64, m dota.BackfillMatch) error {
+	// Always upsert match first so lane outcomes are stored/updated even for already-seen matches.
+	startTime := time.Unix(m.StartDateTime, 0).UTC()
+	if err := s.db.UpsertMatch(m.ID, startTime, m.DurationSecs, int(m.GameMode), m.DidRadiantWin, false, m.TopLaneOutcome, m.MidLaneOutcome, m.BottomLaneOutcome); err != nil {
+		return fmt.Errorf("upsert match: %w", err)
+	}
+
 	exists, err := s.db.PlayerMatchExists(m.ID, dotaID)
 	if err != nil {
 		return err
 	}
 	if exists {
 		return nil
-	}
-
-	startTime := time.Unix(m.StartDateTime, 0).UTC()
-	if err := s.db.UpsertMatch(m.ID, startTime, m.DurationSecs, int(m.GameMode), m.DidRadiantWin, false, m.TopLaneOutcome, m.MidLaneOutcome, m.BottomLaneOutcome); err != nil {
-		return fmt.Errorf("upsert match: %w", err)
 	}
 
 	for _, p := range m.Players {

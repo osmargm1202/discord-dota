@@ -2239,28 +2239,11 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 		resultEmoji = "❌"
 		resultLabel = "Derrota"
 	}
-	// Extract player's own lane result from the multiline laneSummary
-	playerLaneOutcomeLine := ""
-	for _, ln := range strings.Split(laneSummary, "\n") {
-		if strings.Contains(ln, "(tú)") {
-			if parts := strings.SplitN(ln, ":", 2); len(parts) == 2 {
-				val := strings.TrimSpace(parts[1])
-				lo := strings.ToLower(val)
-				switch {
-				case strings.Contains(lo, "victoria"):
-					playerLaneOutcomeLine = "✅ Victoria en fase de línea"
-				case strings.Contains(lo, "derrota"):
-					playerLaneOutcomeLine = "❌ Derrota en fase de línea"
-				case strings.Contains(lo, "empate"):
-					playerLaneOutcomeLine = "➖ Empate en fase de línea"
-				}
-			}
-			break
-		}
-	}
+	// lanePhaseLine already has the correct win/loss for this player's lane
 	msgHeader := fmt.Sprintf("**%s - %s %s**\n%s | %s", personaname, resultEmoji, resultLabel, heroName, gameModeDisplayName)
-	if playerLaneOutcomeLine != "" {
-		msgHeader += "\n" + playerLaneOutcomeLine
+	if lanePhaseLine != "" {
+		plain := strings.TrimSpace(strings.ReplaceAll(lanePhaseLine, "*", ""))
+		msgHeader += "\n" + plain
 	}
 	msgContent := msgHeader + "\n" + stratzURL
 

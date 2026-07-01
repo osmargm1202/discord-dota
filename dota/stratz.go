@@ -839,12 +839,17 @@ func IsMatchParsed(m *StratzMatch) bool {
 	if m.TopLaneOutcome == "" {
 		return false
 	}
+	hasLane := false
+	hasImp := false
 	for _, p := range m.Players {
 		if p.Lane != "" {
-			return true
+			hasLane = true
+		}
+		if p.Imp != 0 {
+			hasImp = true
 		}
 	}
-	return false
+	return hasLane && hasImp
 }
 
 // RequestParseMatch solicita el parse de una partida en Stratz (si la API expone la mutación)

@@ -1351,10 +1351,13 @@ func (b *Bot) CheckForNewMatches() error {
 			continue
 		}
 
-		// Esperar 10s tras partida parseada para que Stratz tenga listos todos los datos del parseo (imp, award, etc.)
+		// Re-fetch match after short delay to get freshest IMP/Award data from Stratz
 		if matchDetailsStratz != nil && dota.IsMatchParsed(matchDetailsStratz) {
-			getLogger().Infof("Partida %d parseada (parsedDateTime=%d), esperando 10s y notificando", latestStratzMatch.ID, *matchDetailsStratz.ParsedDateTime)
-			time.Sleep(10 * time.Second)
+			getLogger().Infof("Partida %d parseada, esperando 30s y re-fetching antes de notificar", latestStratzMatch.ID)
+			time.Sleep(30 * time.Second)
+			if refreshed, errRefresh := b.stratzClient.GetMatch(latestStratzMatch.ID); errRefresh == nil {
+				matchDetailsStratz = refreshed
+			}
 		} else {
 			getLogger().Infof("Partida %d procesando sin parsedDateTime (RequireParsed=%v)", latestStratzMatch.ID, b.config.RequireParsed)
 		}

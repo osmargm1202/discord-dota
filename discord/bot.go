@@ -1598,10 +1598,7 @@ func fetchImageBytes(url string) ([]byte, error) {
 }
 
 func formatIMP(imp int) string {
-	if imp == 0 {
-		return "—"
-	}
-	if imp > 0 {
+	if imp >= 0 {
 		return fmt.Sprintf("+%d", imp)
 	}
 	return strconv.Itoa(imp)
@@ -2191,10 +2188,8 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 			mp.HeroName = fmt.Sprintf("Hero %d", p.HeroID)
 		}
 		// IMP and Award are per-match data available for all players
-		if p.Imp != 0 {
-			mp.IMP = p.Imp
-			mp.ShowIMP = true
-		}
+		mp.IMP = p.Imp
+		mp.ShowIMP = true
 		mp.Award = p.Award
 		// Hero thumbnail for the row
 		heroURL := b.dotaClient.GetHeroImageURL(p.HeroID)

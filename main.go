@@ -78,18 +78,27 @@ func main() {
 		logrus.Warn("POSTGRES_DSN no configurado — usando solo JSON storage")
 	}
 
-	// MinIO
+	// MinIO — retry up to 5 times with 3s delay to survive container startup races
 	var minioClient *minioclient.Client
 	if cfg.MinioEndpoint != "" && database != nil {
-		minioClient, err = minioclient.New(
-			cfg.MinioEndpoint,
-			cfg.MinioAccessKey,
-			cfg.MinioSecretKey,
-			cfg.MinioBucket,
-			cfg.MinioPublicURL,
-		)
+		for attempt := 1; attempt <= 5; attempt++ {
+			minioClient, err = minioclient.New(
+				cfg.MinioEndpoint,
+				cfg.MinioAccessKey,
+				cfg.MinioSecretKey,
+				cfg.MinioBucket,
+				cfg.MinioPublicURL,
+			)
+			if err == nil {
+				break
+			}
+			logrus.Warnf("MinIO intento %d/5 fallido: %v", attempt, err)
+			if attempt < 5 {
+				time.Sleep(3 * time.Second)
+			}
+		}
 		if err != nil {
-			logrus.Warnf("MinIO no disponible: %v", err)
+			logrus.Warnf("MinIO no disponible tras 5 intentos: %v", err)
 		} else {
 			logrus.Info("MinIO conectado")
 			// Daily cleanup: delete match notification images older than 30 days

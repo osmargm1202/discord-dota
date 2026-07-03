@@ -2340,9 +2340,9 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 				})
 			}
 		} else {
-			// Dev: file attachment + Stratz link
+			// Dev/fallback: file attachment + full header (no MinIO available)
 			_, sendErr = b.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-				Content: stratzURL,
+				Content: msgContent,
 				Files:   []*discordgo.File{{Name: "partida.png", ContentType: "image/png", Reader: bytes.NewReader(imgBytes)}},
 			})
 		}

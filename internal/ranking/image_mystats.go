@@ -135,16 +135,17 @@ func (g *ImageGenerator) drawMyStatsHeader(dc *gg.Context, d MyHeroStatsRenderDa
 
 // Column x-fractions (of canvasW) for the build-group table.
 const (
-	colBuildX = 0.03
-	colGameX  = 0.28
-	colWinX   = 0.35
-	colLossX  = 0.42
-	colPctX   = 0.49
-	colLaneWX = 0.66
-	colLaneLX = 0.74
-	colLaneEX = 0.82
-	grpMatchX = 0.385 // "PARTIDA" group label, centered over W/L/%
-	grpLaneX  = 0.74  // "LÍNEA" group label, centered over LnW/LnL/LnE
+	colBuildX   = 0.03
+	colGameX    = 0.26
+	colWinX     = 0.33
+	colLossX    = 0.40
+	colPctX     = 0.47
+	colLaneWX   = 0.62
+	colLaneLX   = 0.69
+	colLaneEX   = 0.76
+	colLanePctX = 0.85
+	grpMatchX   = 0.36 // "PARTIDA" group label, centered over W/L/%
+	grpLaneX    = 0.71 // "LÍNEA" group label, centered over LnW/LnL/LnE/%
 )
 
 func (g *ImageGenerator) drawBuildGroupTable(dc *gg.Context, rows []BuildGroupRow, y, rH float64) {
@@ -173,6 +174,7 @@ func (g *ImageGenerator) drawBuildGroupTable(dc *gg.Context, rows []BuildGroupRo
 	dc.DrawStringAnchored("W", w*colLaneWX, labelY, 0.5, 0.5)
 	dc.DrawStringAnchored("L", w*colLaneLX, labelY, 0.5, 0.5)
 	dc.DrawStringAnchored("E", w*colLaneEX, labelY, 0.5, 0.5)
+	dc.DrawStringAnchored("%", w*colLanePctX, labelY, 0.5, 0.5)
 
 	ry := y + headH
 	for idx, row := range rows {
@@ -184,6 +186,11 @@ func (g *ImageGenerator) drawBuildGroupTable(dc *gg.Context, rows []BuildGroupRo
 		pct := 0.0
 		if row.Total > 0 {
 			pct = float64(row.Wins) / float64(row.Total) * 100
+		}
+		laneTotal := row.LaneWins + row.LaneLosses + row.LaneTies
+		lanePct := 0.0
+		if laneTotal > 0 {
+			lanePct = float64(row.LaneWins) / float64(laneTotal) * 100
 		}
 		cy := ry + rH/2
 
@@ -204,6 +211,8 @@ func (g *ImageGenerator) drawBuildGroupTable(dc *gg.Context, rows []BuildGroupRo
 		dc.DrawStringAnchored(fmt.Sprintf("%d", row.LaneLosses), w*colLaneLX, cy, 0.5, 0.5)
 		dc.SetColor(colorGray)
 		dc.DrawStringAnchored(fmt.Sprintf("%d", row.LaneTies), w*colLaneEX, cy, 0.5, 0.5)
+		dc.SetColor(colorGold)
+		dc.DrawStringAnchored(fmt.Sprintf("%.0f%%", lanePct), w*colLanePctX, cy, 0.5, 0.5)
 
 		ry += rH
 	}

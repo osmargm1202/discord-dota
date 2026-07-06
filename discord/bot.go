@@ -211,6 +211,12 @@ func (b *Bot) registerCommands() error {
 							Description: "Jugador a consultar (opcional, por defecto tú)",
 							Required:    false,
 						},
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "account_id",
+							Description: "Dota 2 Account ID directo (opcional, tiene prioridad sobre 'jugador')",
+							Required:    false,
+						},
 					},
 				},
 				{
@@ -939,6 +945,7 @@ func (b *Bot) handleMyStatsSlash(s *discordgo.Session, i *discordgo.InteractionC
 	var heroQuery string
 	var level int
 	var jugadorID string
+	var accountIDOpt string
 	for _, opt := range subcommand.Options {
 		switch opt.Name {
 		case "hero":
@@ -947,6 +954,8 @@ func (b *Bot) handleMyStatsSlash(s *discordgo.Session, i *discordgo.InteractionC
 			level = int(opt.IntValue())
 		case "jugador":
 			jugadorID = opt.UserValue(s).ID
+		case "account_id":
+			accountIDOpt = opt.StringValue()
 		}
 	}
 
@@ -960,22 +969,28 @@ func (b *Bot) handleMyStatsSlash(s *discordgo.Session, i *discordgo.InteractionC
 		return
 	}
 
-	targetDiscordID := jugadorID
-	if targetDiscordID == "" {
-		if i.Member != nil {
-			targetDiscordID = i.Member.User.ID
-		} else if i.User != nil {
-			targetDiscordID = i.User.ID
+	var accountIDStr string
+	if accountIDOpt != "" {
+		accountIDStr = accountIDOpt
+	} else {
+		targetDiscordID := jugadorID
+		if targetDiscordID == "" {
+			if i.Member != nil {
+				targetDiscordID = i.Member.User.ID
+			} else if i.User != nil {
+				targetDiscordID = i.User.ID
+			}
 		}
-	}
-	accountIDStr, found := b.userStore.Get(targetDiscordID)
-	if !found {
-		b.sendFollowup(s, i, "❌ Ese jugador no está registrado. Usa `/dota register account_id:<tu_steam_id>`.")
-		return
+		var found bool
+		accountIDStr, found = b.userStore.Get(targetDiscordID)
+		if !found {
+			b.sendFollowup(s, i, "❌ Ese jugador no está registrado. Usa `/dota register account_id:<tu_steam_id>` o pasa `account_id` directamente.")
+			return
+		}
 	}
 	accountID, parseErr := strconv.ParseInt(accountIDStr, 10, 64)
 	if parseErr != nil {
-		b.sendFollowup(s, i, "❌ account_id registrado inválido.")
+		b.sendFollowup(s, i, "❌ account_id inválido.")
 		return
 	}
 
@@ -1078,8 +1093,8 @@ func (b *Bot) handleHelpSlash(s *discordgo.Session, i *discordgo.InteractionCrea
 				Inline: false,
 			},
 			{
-				Name:   "/dota mystats hero:<nombre> level:<1-9> [jugador:@usuario]",
-				Value:  "Record de victorias agrupado por build de habilidades (Q-W-E-R) en un héroe, hasta el nivel indicado. Sin `jugador`, usa tu propia cuenta registrada.\n**Ejemplo:** `/dota mystats hero:Viper level:6`",
+				Name:   "/dota mystats hero:<nombre> level:<1-9> [jugador:@usuario] [account_id:<id>]",
+				Value:  "Record de victorias agrupado por build de habilidades (Q-W-E-R) en un héroe, hasta el nivel indicado. Sin `jugador` ni `account_id`, usa tu propia cuenta registrada. `account_id` (Dota ID directo) tiene prioridad sobre `jugador` (Discord).\n**Ejemplo:** `/dota mystats hero:Viper level:6`",
 				Inline: false,
 			},
 			{

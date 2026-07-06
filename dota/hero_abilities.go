@@ -16,12 +16,20 @@ type heroAbilitiesRaw struct {
 // see docs/superpowers/specs/2026-07-06-mystats-ability-build-design.md
 // for why "last array entry" is not a reliable way to find the ultimate.
 func parseHeroAbilitiesJSON(data []byte) (map[string][3]string, error) {
-	var raw map[string]heroAbilitiesRaw
-	if err := json.Unmarshal(data, &raw); err != nil {
+	var rawEntries map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawEntries); err != nil {
 		return nil, err
 	}
-	out := make(map[string][3]string, len(raw))
-	for heroName, v := range raw {
+	out := make(map[string][3]string, len(rawEntries))
+	for heroName, entry := range rawEntries {
+		var v heroAbilitiesRaw
+		// Some heroes (e.g. Monkey King) have a non-string entry in their
+		// abilities array (a facet/transformation swap pair encoded as a
+		// nested array). Skip just that hero rather than failing the
+		// whole batch — see docs/superpowers/specs/2026-07-06-mystats-ability-build-design.md.
+		if err := json.Unmarshal(entry, &v); err != nil {
+			continue
+		}
 		if len(v.Abilities) >= 3 {
 			out[heroName] = [3]string{v.Abilities[0], v.Abilities[1], v.Abilities[2]}
 		}

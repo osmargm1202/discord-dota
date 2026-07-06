@@ -1032,11 +1032,13 @@ func (b *Bot) handleMyStatsSlash(s *discordgo.Session, i *discordgo.InteractionC
 	totalGames := 0
 	for _, g := range groups {
 		rows = append(rows, ranking.BuildGroupRow{
-			Label:  g.Tuple.Label(),
-			Wins:   g.Wins,
-			Losses: g.Losses,
-			Draws:  0,
-			Total:  g.Total,
+			Label:      g.Tuple.Label(),
+			Wins:       g.Wins,
+			Losses:     g.Losses,
+			Total:      g.Total,
+			LaneWins:   g.LaneWins,
+			LaneLosses: g.LaneLosses,
+			LaneTies:   g.LaneTies,
 		})
 		totalGames += g.Total
 	}

@@ -17,7 +17,10 @@ type AbilityPick struct {
 type AbilityBuildMatch struct {
 	MatchID int64
 	Win     bool
-	Picks   []AbilityPick
+	// LaneOutcome is "won", "lost", "tied", or "" (no fixed lane / unknown).
+	// See LaneOutcomeForPlayer.
+	LaneOutcome string
+	Picks       []AbilityPick
 }
 
 // BuildTuple counts skill points spent on Q, W, E, R.
@@ -78,6 +81,11 @@ type BuildGroup struct {
 	Wins   int
 	Losses int
 	Total  int
+	// Lane outcome counts contrast the build against how often the
+	// player's own lane was won/lost/tied (independent of match result).
+	LaneWins   int
+	LaneLosses int
+	LaneTies   int
 }
 
 // GroupBuildResults computes each match's build tuple and groups matches
@@ -102,6 +110,14 @@ func GroupBuildResults(matches []AbilityBuildMatch, level int, qName, wName, eNa
 			g.Wins++
 		} else {
 			g.Losses++
+		}
+		switch m.LaneOutcome {
+		case "won":
+			g.LaneWins++
+		case "lost":
+			g.LaneLosses++
+		case "tied":
+			g.LaneTies++
 		}
 	}
 

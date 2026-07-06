@@ -103,9 +103,9 @@ func TestGroupBuildResults(t *testing.T) {
 	}
 
 	matches := []AbilityBuildMatch{
-		{MatchID: 1, Win: true, Picks: build1113},
-		{MatchID: 2, Win: false, Picks: build1113},
-		{MatchID: 3, Win: true, Picks: build3111},
+		{MatchID: 1, Win: true, LaneOutcome: "won", Picks: build1113},
+		{MatchID: 2, Win: false, LaneOutcome: "lost", Picks: build1113},
+		{MatchID: 3, Win: true, LaneOutcome: "tied", Picks: build3111},
 	}
 
 	groups := GroupBuildResults(matches, 6, viperQ, viperW, viperE)
@@ -120,11 +120,17 @@ func TestGroupBuildResults(t *testing.T) {
 	if groups[0].Total != 2 || groups[0].Wins != 1 || groups[0].Losses != 1 {
 		t.Errorf("groups[0] = %+v, want Total=2 Wins=1 Losses=1", groups[0])
 	}
+	if groups[0].LaneWins != 1 || groups[0].LaneLosses != 1 || groups[0].LaneTies != 0 {
+		t.Errorf("groups[0] lane = %+v, want LaneWins=1 LaneLosses=1 LaneTies=0", groups[0])
+	}
 
 	if groups[1].Tuple.Label() != "3-1-1-1" {
 		t.Errorf("groups[1].Tuple.Label() = %q, want 3-1-1-1", groups[1].Tuple.Label())
 	}
 	if groups[1].Total != 1 || groups[1].Wins != 1 || groups[1].Losses != 0 {
 		t.Errorf("groups[1] = %+v, want Total=1 Wins=1 Losses=0", groups[1])
+	}
+	if groups[1].LaneTies != 1 {
+		t.Errorf("groups[1] lane = %+v, want LaneTies=1", groups[1])
 	}
 }

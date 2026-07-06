@@ -996,8 +996,12 @@ func (c *StratzClient) GetPlayerHeroAbilityBuilds(steamAccountID int64, heroID i
 				matches(request: { heroIds: [$heroId], startDateTime: $after, take: $take, skip: $skip }) {
 					id
 					didRadiantWin
+					topLaneOutcome
+					midLaneOutcome
+					bottomLaneOutcome
 					players(steamAccountId: $steamAccountId) {
 						isRadiant
+						lane
 						abilities {
 							time
 							isTalent
@@ -1013,10 +1017,14 @@ func (c *StratzClient) GetPlayerHeroAbilityBuilds(steamAccountID int64, heroID i
 		var result struct {
 			Player struct {
 				Matches []struct {
-					ID            int64 `json:"id"`
-					DidRadiantWin bool  `json:"didRadiantWin"`
-					Players       []struct {
-						IsRadiant bool `json:"isRadiant"`
+					ID                int64  `json:"id"`
+					DidRadiantWin     bool   `json:"didRadiantWin"`
+					TopLaneOutcome    string `json:"topLaneOutcome"`
+					MidLaneOutcome    string `json:"midLaneOutcome"`
+					BottomLaneOutcome string `json:"bottomLaneOutcome"`
+					Players           []struct {
+						IsRadiant bool   `json:"isRadiant"`
+						Lane      string `json:"lane"`
 						Abilities []struct {
 							Time        int  `json:"time"`
 							IsTalent    bool `json:"isTalent"`
@@ -1057,9 +1065,10 @@ func (c *StratzClient) GetPlayerHeroAbilityBuilds(steamAccountID int64, heroID i
 				})
 			}
 			out = append(out, AbilityBuildMatch{
-				MatchID: m.ID,
-				Win:     m.DidRadiantWin == p.IsRadiant,
-				Picks:   picks,
+				MatchID:     m.ID,
+				Win:         m.DidRadiantWin == p.IsRadiant,
+				LaneOutcome: LaneOutcomeForPlayer(p.Lane, p.IsRadiant, m.TopLaneOutcome, m.MidLaneOutcome, m.BottomLaneOutcome),
+				Picks:       picks,
 			})
 		}
 

@@ -30,6 +30,36 @@ times that build was played and its win rate, alongside other builds used
 - No abilityId→slot(Q/W/E/R) mapping exists anywhere in this repo. Stratz's
   `abilityType.name` gives the ability's internal name (e.g.
   `viper_poison_attack`) but not its slot number.
+- OpenDota's `GET /api/constants/hero_abilities` gives, per hero, an
+  `abilities` array. **Index 0 = Q, index 1 = W, index 2 = E always**
+  (confirmed on Viper, Axe, Juggernaut). The array's LAST index is **not**
+  reliably the ultimate: Axe's array is `[axe_berserkers_call,
+  axe_battle_hunger, axe_counter_helix, generic_hidden, generic_hidden,
+  axe_culling_blade, axe_one_man_army]` — the real ultimate
+  (`axe_culling_blade`) sits at index 5, followed by an Aghanim's Shard
+  alt-cast ability (`axe_one_man_army`) at index 6. A naive "last index"
+  rule would mislabel the Shard ability as the ultimate.
+- Stratz's `AbilityStatType.isUltimate` field is **not reliable either** —
+  confirmed on real data: querying it for Viper's actual ultimate
+  (`viper_viper_strike`, abilityId 5221) returned `isUltimate: false`.
+  Do not use this field.
+- **Actual rule used (elimination, no ultimate-flag needed):** vendor only
+  `abilities[0..2]` (Q/W/E names) per hero from `hero_abilities.json`. For
+  each match, after collecting the distinct non-talent ability names in
+  the player's pick log: any name matching `abilities[0]`→Q,
+  `abilities[1]`→W, `abilities[2]`→E; **any other non-talent name
+  encountered is R by elimination**. This works because
+  `generic_hidden`/Shard-alt/Aghanim's-Scepter-granted abilities (e.g.
+  `axe_one_man_army`, Viper's `viper_nose_dive`/`viper_predator`) are never
+  separately skill-pointed by the player — they never appear as their own
+  entry in the real Stratz `abilities` pick log — so the only 4th distinct
+  name that can show up is the true ultimate. Confirmed against real data:
+  Viper match `8883621088`'s pick log only ever contains
+  `viper_poison_attack`, `viper_nethertoxin`, `viper_corrosive_skin`,
+  `viper_viper_strike`, plus 2 talents — never `viper_nose_dive` or
+  `viper_predator`.
+- `talents` in the OpenDota payload is a separate array (`{name, level}`),
+  redundant with Stratz's own `isTalent` flag — not used.
 - No Discord autocomplete interaction handling exists in `discord/bot.go`
   (`InteractionApplicationCommandAutocomplete` is not handled anywhere).
 - `dota/heroes.json` (vendored OpenDota dump) has `localized_name` but no
@@ -90,11 +120,13 @@ afterUnix int64) ([]AbilityBuildMatch, error)`:
 
 ### Ability slot mapping (`dota/hero_abilities.json` + loader)
 
-- Vendor OpenDota's ability ordering data, same loading pattern as
-  `loadHeroesLocal` (api.go:466).
-- Loader builds `map[string]map[string]int` (hero internal name → ability
-  internal name → slot index 0=Q,1=W,2=E,3=R; talents flagged separately
-  and excluded from the level 1-9 scope).
+- Vendor `GET https://api.opendota.com/api/constants/hero_abilities` as
+  `dota/hero_abilities.json`, same loading pattern as `loadHeroesLocal`
+  (api.go:466). Only `abilities[0..2]` (Q/W/E) per hero are used — no
+  attempt is made to identify R from this file (see rule above).
+- Loader builds `map[string][3]string` (hero internal name → `[Q-name,
+  W-name, E-name]`), i.e. just the first 3 entries of each hero's
+  `abilities` array.
 
 ### Build computation (new file, e.g. `dota/ability_build.go`)
 
@@ -102,8 +134,11 @@ For each match returned by `GetPlayerHeroAbilityBuilds`:
 1. Sort `abilities` by `time` ascending.
 2. Take the first `level` entries. If fewer than `level` entries exist
    (remake/abandon before reaching that level), **skip this match**.
-3. Map each entry's `abilityType.name` to a slot via the vendored mapping.
-   If any entry's name isn't found in the mapping, **skip this match** and
+3. For each of the (at most 3) distinct non-talent ability names in that
+   slice: if it matches the hero's `[Q-name, W-name, E-name]` vendor
+   entry, bucket it there; otherwise bucket it as R (elimination rule — see
+   above). If a 5th distinct non-talent name shows up (would mean the
+   elimination assumption broke for this hero), **skip this match** and
    log a warning (don't crash).
 4. Count picks per slot → tuple `(q, w, e, r)`.
 5. Determine win: `didRadiantWin == isRadiant` for the target player.
@@ -137,7 +172,7 @@ New `RenderMyHeroStats(d MyHeroStatsRenderData) ([]byte, error)`:
 | Jugador (self or mentioned) not registered | Same message pattern as existing commands ("no está registrado, usa /dota register") |
 | No matches found for hero+player since BaseYear | Followup message, same tone as `/dota stats`'s empty case |
 | Match has no/incomplete `abilities` data (unparsed, remake, abandon) | Silently excluded from grouping, not shown as an error |
-| Ability name not in vendored mapping | That match excluded, `getLogger().Warnf` logged, command still completes |
+| 5th distinct non-talent ability name appears in the first N picks (elimination rule assumption broken for this hero) | That match excluded, `getLogger().Warnf` logged, command still completes |
 
 ## Testing
 

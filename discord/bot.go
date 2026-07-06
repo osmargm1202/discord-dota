@@ -179,6 +179,42 @@ func (b *Bot) registerCommands() error {
 				},
 				{
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "mystats",
+					Description: "Record de victorias agrupado por build de habilidades (Q-W-E-R) en un héroe y nivel",
+					Options: []*discordgo.ApplicationCommandOption{
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "hero",
+							Description: "Nombre del héroe (ej. Viper, Juggernaut)",
+							Required:    true,
+						},
+						{
+							Type:        discordgo.ApplicationCommandOptionInteger,
+							Name:        "level",
+							Description: "Nivel del héroe a evaluar (1-9)",
+							Required:    true,
+							Choices: []*discordgo.ApplicationCommandOptionChoice{
+								{Name: "1", Value: 1},
+								{Name: "2", Value: 2},
+								{Name: "3", Value: 3},
+								{Name: "4", Value: 4},
+								{Name: "5", Value: 5},
+								{Name: "6", Value: 6},
+								{Name: "7", Value: 7},
+								{Name: "8", Value: 8},
+								{Name: "9", Value: 9},
+							},
+						},
+						{
+							Type:        discordgo.ApplicationCommandOptionUser,
+							Name:        "jugador",
+							Description: "Jugador a consultar (opcional, por defecto tú)",
+							Required:    false,
+						},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
 					Name:        "queue",
 					Description: "Ver partidas en cola esperando parseo de Stratz",
 				},
@@ -331,6 +367,8 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 		b.handleChannelSlash(s, i, subcommand)
 	case "stats":
 		b.handleStatsSlash(s, i)
+	case "mystats":
+		b.handleMyStatsSlash(s, i, subcommand)
 	case "queue":
 		b.handleQueueSlash(s, i)
 	case "match":
@@ -892,6 +930,127 @@ func (b *Bot) handleStatsSlash(s *discordgo.Session, i *discordgo.InteractionCre
 	}
 }
 
+func (b *Bot) handleMyStatsSlash(s *discordgo.Session, i *discordgo.InteractionCreate, subcommand *discordgo.ApplicationCommandInteractionDataOption) {
+	if b.stratzClient == nil || !b.stratzClient.IsConfigured() {
+		b.sendFollowup(s, i, "❌ Stratz no está configurado.")
+		return
+	}
+
+	var heroQuery string
+	var level int
+	var jugadorID string
+	for _, opt := range subcommand.Options {
+		switch opt.Name {
+		case "hero":
+			heroQuery = opt.StringValue()
+		case "level":
+			level = int(opt.IntValue())
+		case "jugador":
+			jugadorID = opt.UserValue(s).ID
+		}
+	}
+
+	heroID, heroName, candidates, err := b.dotaClient.FindHeroByName(heroQuery)
+	if err != nil {
+		if len(candidates) > 0 {
+			b.sendFollowup(s, i, fmt.Sprintf("❌ Varios héroes coinciden con \"%s\": %s. Sé más específico.", heroQuery, strings.Join(candidates, ", ")))
+		} else {
+			b.sendFollowup(s, i, fmt.Sprintf("❌ No encontré el héroe \"%s\".", heroQuery))
+		}
+		return
+	}
+
+	targetDiscordID := jugadorID
+	if targetDiscordID == "" {
+		if i.Member != nil {
+			targetDiscordID = i.Member.User.ID
+		} else if i.User != nil {
+			targetDiscordID = i.User.ID
+		}
+	}
+	accountIDStr, found := b.userStore.Get(targetDiscordID)
+	if !found {
+		b.sendFollowup(s, i, "❌ Ese jugador no está registrado. Usa `/dota register account_id:<tu_steam_id>`.")
+		return
+	}
+	accountID, parseErr := strconv.ParseInt(accountIDStr, 10, 64)
+	if parseErr != nil {
+		b.sendFollowup(s, i, "❌ account_id registrado inválido.")
+		return
+	}
+
+	qName, wName, eName, ok := b.dotaClient.GetHeroQWE(heroID)
+	if !ok {
+		b.sendFollowup(s, i, fmt.Sprintf("❌ No tengo datos de habilidades para %s.", heroName))
+		return
+	}
+
+	afterUnix := time.Date(b.config.BaseYear, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+	matches, err := b.stratzClient.GetPlayerHeroAbilityBuilds(accountID, heroID, afterUnix)
+	if err != nil {
+		b.sendFollowup(s, i, fmt.Sprintf("❌ Error consultando Stratz: %v", err))
+		return
+	}
+
+	groups := dota.GroupBuildResults(matches, level, qName, wName, eName)
+	if len(groups) == 0 {
+		b.sendFollowup(s, i, fmt.Sprintf("No encontré partidas de %s con datos de habilidades hasta nivel %d desde %d.", heroName, level, b.config.BaseYear))
+		return
+	}
+
+	playerName, avatarURL := b.getPlayerNameAndAvatar(accountIDStr, accountID)
+
+	var avatarBytes, heroImgBytes []byte
+	ctx := context.Background()
+	if b.minioClient != nil {
+		avatarKey := fmt.Sprintf("assets/avatars/%s.jpg", accountIDStr)
+		avatarBytes, _ = b.minioClient.GetCached(ctx, avatarKey)
+		if len(avatarBytes) == 0 && avatarURL != "" {
+			avatarBytes, _ = b.minioClient.GetOrFetchAsset(ctx, avatarKey, avatarURL)
+		}
+		if heroURL := b.dotaClient.GetHeroImageURL(heroID); heroURL != "" {
+			heroImgBytes, _ = b.minioClient.GetOrFetchAsset(ctx, fmt.Sprintf("assets/heroes/%d.png", heroID), heroURL)
+		}
+	}
+
+	rows := make([]ranking.BuildGroupRow, 0, len(groups))
+	totalGames := 0
+	for _, g := range groups {
+		rows = append(rows, ranking.BuildGroupRow{
+			Label:  g.Tuple.Label(),
+			Wins:   g.Wins,
+			Losses: g.Losses,
+			Draws:  0,
+			Total:  g.Total,
+		})
+		totalGames += g.Total
+	}
+
+	renderData := ranking.MyHeroStatsRenderData{
+		PlayerName:     playerName,
+		AvatarBytes:    avatarBytes,
+		HeroName:       heroName,
+		HeroImageBytes: heroImgBytes,
+		Level:          level,
+		Groups:         rows,
+		TotalGames:     totalGames,
+	}
+	gen := ranking.NewImageGenerator()
+	imgBytes, renderErr := gen.RenderMyHeroStats(renderData)
+	if renderErr != nil {
+		b.sendFollowup(s, i, fmt.Sprintf("❌ Error generando imagen: %v", renderErr))
+		return
+	}
+
+	fname := fmt.Sprintf("mystats-%d-%d.png", heroID, level)
+	_, ferr := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Files: []*discordgo.File{{Name: fname, ContentType: "image/png", Reader: bytes.NewReader(imgBytes)}},
+	})
+	if ferr != nil {
+		getLogger().Errorf("mystats: send PNG followup: %v", ferr)
+	}
+}
+
 func (b *Bot) handleHelpSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	embed := &discordgo.MessageEmbed{
 		Title:       "🎮 Comandos del Bot de Dota 2",
@@ -916,6 +1075,11 @@ func (b *Bot) handleHelpSlash(s *discordgo.Session, i *discordgo.InteractionCrea
 			{
 				Name:   "/dota stats",
 				Value:  "Un mensaje por cada usuario registrado: estadísticas por héroe (W/L, %) con ≥STATS_MIN_GAMES partidas en las últimas STATS_TAKE partidas. Colores: 🔴 ≤40%, 🟡 40-50%, 🟢 ≥50%.",
+				Inline: false,
+			},
+			{
+				Name:   "/dota mystats hero:<nombre> level:<1-9> [jugador:@usuario]",
+				Value:  "Record de victorias agrupado por build de habilidades (Q-W-E-R) en un héroe, hasta el nivel indicado. Sin `jugador`, usa tu propia cuenta registrada.\n**Ejemplo:** `/dota mystats hero:Viper level:6`",
 				Inline: false,
 			},
 			{

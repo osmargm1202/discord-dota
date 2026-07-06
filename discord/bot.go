@@ -36,7 +36,6 @@ type Bot struct {
 	minioClient    *minioclient.Client
 	rankingUpdater *ranking.Updater
 	backfillSvc    *backfill.Service
-	initialRunDone bool // false on first CheckForNewMatches — always processes latest match
 	matchRetries   map[string]int // "discordID:matchID" → retry count when player not found in match
 	pendingMatches map[string]pendingMatch // discordID → match pending parse
 }
@@ -1263,10 +1262,6 @@ func (b *Bot) CheckForNewMatches() error {
 		return nil
 	}
 
-	// On first run after startup: always show the latest match per user (catch-up)
-	isInitialRun := !b.initialRunDone
-	b.initialRunDone = true
-
 	for discordID, accountID := range users {
 		lastMatchID, hasLastMatch := b.userStore.GetLastMatch(discordID)
 
@@ -1290,14 +1285,9 @@ func (b *Bot) CheckForNewMatches() error {
 
 		latestStratzMatch := matches[0]
 
-		// Skip if already processed — UNLESS this is the initial run (catch-up on startup)
-		if !isInitialRun && hasLastMatch && latestStratzMatch.ID == lastMatchID {
+		// Skip if already processed
+		if hasLastMatch && latestStratzMatch.ID == lastMatchID {
 			continue
-		}
-		// On initial run with an already-processed match: show but don't re-save (avoid duplicate on next tick)
-		alreadyProcessed := hasLastMatch && latestStratzMatch.ID == lastMatchID
-		if isInitialRun && alreadyProcessed {
-			getLogger().Infof("Arranque: mostrando última partida conocida %d para %s", latestStratzMatch.ID, accountID)
 		}
 
 		getLogger().Infof("Nueva partida detectada para %s: %d", accountID, latestStratzMatch.ID)
@@ -1397,9 +1387,7 @@ func (b *Bot) CheckForNewMatches() error {
 			getLogger().Warnf("Jugador dota_id=%d no encontrado en partida %d (intento %d). AccountIDs en match: %v", accountIDInt, latestStratzMatch.ID, retries, ids)
 			if retries >= 5 {
 				getLogger().Warnf("Máx reintentos para partida %d de %s — omitiendo definitivamente", latestStratzMatch.ID, accountID)
-				if !alreadyProcessed {
-					_ = b.userStore.SetLastMatch(discordID, latestStratzMatch.ID)
-				}
+				_ = b.userStore.SetLastMatch(discordID, latestStratzMatch.ID)
 				delete(b.matchRetries, retryKey)
 			}
 			continue
@@ -1442,17 +1430,14 @@ func (b *Bot) CheckForNewMatches() error {
 		}
 
 		// Save new match to PostgreSQL so ranking reflects it
-		if b.db != nil && !alreadyProcessed {
+		if b.db != nil {
 			b.storeNewMatchToDB(matchDetailsStratz, playerStratz, accountIDInt)
 			_ = b.db.MarkParseDone(latestStratzMatch.ID)
 		}
 		delete(b.pendingMatches, discordID)
 
-		// Don't overwrite last match ID if this was just a catch-up display (already processed)
-		if !alreadyProcessed {
-			if err := b.userStore.SetLastMatch(discordID, latestStratzMatch.ID); err != nil {
-				getLogger().Errorf("Error guardando última partida: %v", err)
-			}
+		if err := b.userStore.SetLastMatch(discordID, latestStratzMatch.ID); err != nil {
+			getLogger().Errorf("Error guardando última partida: %v", err)
 		}
 
 		time.Sleep(2 * time.Second)

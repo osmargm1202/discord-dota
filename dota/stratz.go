@@ -982,6 +982,96 @@ func (c *StratzClient) GetPlayerMatchesForBackfill(steamAccountID int64, take, s
 	return out, nil
 }
 
+// GetPlayerHeroAbilityBuilds fetches every match a player has played on a
+// given hero since afterUnix, including each match's ability pick log.
+// Paginated the same way as GetPlayerMatchesForBackfill.
+func (c *StratzClient) GetPlayerHeroAbilityBuilds(steamAccountID int64, heroID int, afterUnix int64) ([]AbilityBuildMatch, error) {
+	const pageSize = 100
+	var out []AbilityBuildMatch
+	skip := 0
+
+	query := `
+		query GetPlayerHeroAbilityBuilds($steamAccountId: Long!, $heroId: Short!, $after: Long!, $take: Int!, $skip: Int!) {
+			player(steamAccountId: $steamAccountId) {
+				matches(request: { heroIds: [$heroId], startDateTime: $after, take: $take, skip: $skip }) {
+					id
+					didRadiantWin
+					players(steamAccountId: $steamAccountId) {
+						isRadiant
+						abilities {
+							time
+							isTalent
+							abilityType { name }
+						}
+					}
+				}
+			}
+		}
+	`
+
+	for {
+		var result struct {
+			Player struct {
+				Matches []struct {
+					ID            int64 `json:"id"`
+					DidRadiantWin bool  `json:"didRadiantWin"`
+					Players       []struct {
+						IsRadiant bool `json:"isRadiant"`
+						Abilities []struct {
+							Time        int  `json:"time"`
+							IsTalent    bool `json:"isTalent"`
+							AbilityType struct {
+								Name string `json:"name"`
+							} `json:"abilityType"`
+						} `json:"abilities"`
+					} `json:"players"`
+				} `json:"matches"`
+			} `json:"player"`
+		}
+
+		if err := c.makeRequest(query, map[string]interface{}{
+			"steamAccountId": steamAccountID,
+			"heroId":         heroID,
+			"after":          afterUnix,
+			"take":           pageSize,
+			"skip":           skip,
+		}, &result); err != nil {
+			return nil, err
+		}
+
+		if len(result.Player.Matches) == 0 {
+			break
+		}
+
+		for _, m := range result.Player.Matches {
+			if len(m.Players) == 0 {
+				continue
+			}
+			p := m.Players[0]
+			picks := make([]AbilityPick, 0, len(p.Abilities))
+			for _, a := range p.Abilities {
+				picks = append(picks, AbilityPick{
+					Name:     a.AbilityType.Name,
+					Time:     a.Time,
+					IsTalent: a.IsTalent,
+				})
+			}
+			out = append(out, AbilityBuildMatch{
+				MatchID: m.ID,
+				Win:     m.DidRadiantWin == p.IsRadiant,
+				Picks:   picks,
+			})
+		}
+
+		if len(result.Player.Matches) < pageSize {
+			break
+		}
+		skip += pageSize
+	}
+
+	return out, nil
+}
+
 // SearchPlayers con Stratz no está soportado (Stratz no expone búsqueda por nombre en la API pública)
 func (c *StratzClient) SearchPlayers(query string) ([]SearchResponse, error) {
 	return nil, ErrSearchNotSupported

@@ -27,6 +27,7 @@ COPY --from=builder /app/dota-discord-bot .
 COPY --from=builder /app/dota/heroes.json ./dota/
 COPY --from=builder /app/dota/game_mode.json ./dota/
 COPY --from=builder /app/dota/lobby_type.json ./dota/
+COPY --from=builder /app/dota/hero_abilities.json ./dota/
 
 # Crear directorios necesarios
 RUN mkdir -p data logs

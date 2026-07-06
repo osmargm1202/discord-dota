@@ -20,13 +20,14 @@ const (
 )
 
 type Client struct {
-	httpClient      *http.Client
-	heroesCache     map[int]string
-	heroImages      map[int]string
-	heroSlugCache   map[int]string
-	gameModes       map[int]string
-	lobbyTypes      map[int]string
-	lastCacheUpdate time.Time
+	httpClient         *http.Client
+	heroesCache        map[int]string
+	heroImages         map[int]string
+	heroSlugCache      map[int]string
+	heroAbilitiesCache map[string][3]string
+	gameModes          map[int]string
+	lobbyTypes         map[int]string
+	lastCacheUpdate    time.Time
 }
 
 func NewClient() *Client {
@@ -34,11 +35,12 @@ func NewClient() *Client {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		heroesCache:   make(map[int]string),
-		heroImages:    make(map[int]string),
-		heroSlugCache: make(map[int]string),
-		gameModes:     make(map[int]string),
-		lobbyTypes:    make(map[int]string),
+		heroesCache:        make(map[int]string),
+		heroImages:         make(map[int]string),
+		heroSlugCache:      make(map[int]string),
+		heroAbilitiesCache: make(map[string][3]string),
+		gameModes:          make(map[int]string),
+		lobbyTypes:         make(map[int]string),
 	}
 }
 

@@ -5,10 +5,10 @@ import (
 	"context"
 	"dota-discord-bot/config"
 	"dota-discord-bot/dota"
+	"dota-discord-bot/internal/backfill"
 	dbpkg "dota-discord-bot/internal/db"
 	minioclient "dota-discord-bot/internal/minio"
 	"dota-discord-bot/internal/ranking"
-	"dota-discord-bot/internal/backfill"
 	"dota-discord-bot/storage"
 	"errors"
 	"fmt"
@@ -36,15 +36,7 @@ type Bot struct {
 	minioClient    *minioclient.Client
 	rankingUpdater *ranking.Updater
 	backfillSvc    *backfill.Service
-	matchRetries   map[string]int // "discordID:matchID" → retry count when player not found in match
-	pendingMatches map[string]pendingMatch // discordID → match pending parse
-}
-
-type pendingMatch struct {
-	MatchID     int64
-	HeroName    string
-	PlayerName  string
-	DetectedAt  time.Time
+	matchCheckMu   sync.Mutex
 }
 
 func NewBot(cfg *config.Config, dotaClient *dota.Client, stratzClient *dota.StratzClient, userStore *storage.UserStore, database *dbpkg.DB, minioClient *minioclient.Client) (*Bot, error) {
@@ -66,8 +58,6 @@ func NewBot(cfg *config.Config, dotaClient *dota.Client, stratzClient *dota.Stra
 		searchCache:  make(map[string][]dota.SearchResponse),
 		db:           database,
 		minioClient:  minioClient,
-		matchRetries:   make(map[string]int),
-		pendingMatches: make(map[string]pendingMatch),
 	}
 
 	// Cambiar a interactionCreate para manejar slash commands
@@ -710,38 +700,33 @@ func (b *Bot) buildStatsEmbed(heroStats []dota.StratzHeroStats, minGames, take i
 }
 
 func (b *Bot) handleQueueSlash(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if len(b.pendingMatches) == 0 {
-		// Check DB for any that survived a restart
-		if b.db != nil {
-			dbIDs, _ := b.db.GetPendingParseQueue()
-			if len(dbIDs) > 0 {
-				b.sendFollowup(s, i, fmt.Sprintf("⏳ **%d** partida(s) en cola en DB (bot reiniciado, sin detalle en memoria).\nMatch IDs: %v", len(dbIDs), dbIDs))
-				return
-			}
-		}
+	if b.db == nil {
+		b.sendFollowup(s, i, "✅ No hay partidas en cola — todas notificadas.")
+		return
+	}
+	rows, err := b.db.GetPendingParseQueue(25)
+	if err != nil {
+		b.sendFollowup(s, i, fmt.Sprintf("❌ Error consultando cola: %v", err))
+		return
+	}
+	if len(rows) == 0 {
 		b.sendFollowup(s, i, "✅ No hay partidas en cola — todas notificadas.")
 		return
 	}
 	var fields []*discordgo.MessageEmbedField
-	for _, pm := range b.pendingMatches {
-		waiting := time.Since(pm.DetectedAt).Round(time.Second)
-		hero := pm.HeroName
-		if hero == "" {
-			hero = "—"
-		}
+	for _, row := range rows {
 		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   pm.PlayerName,
-			Value:  fmt.Sprintf("Match `%d` • %s • esperando **%s**", pm.MatchID, hero, waiting),
+			Name:   row.DiscordID,
+			Value:  fmt.Sprintf("Match `%d` • Dota `%d` • intentos **%d**", row.MatchID, row.DotaID, row.AttemptCount),
 			Inline: false,
 		})
 	}
-	embed := &discordgo.MessageEmbed{
+	b.sendFollowupEmbed(s, i, &discordgo.MessageEmbed{
 		Title:       "⏳ Cola de parseo — Stratz",
-		Description: "Partidas detectadas esperando que Stratz termine de parsear.",
+		Description: "Partidas persistentes esperando que Stratz termine de parsear.",
 		Fields:      fields,
 		Color:       0xF39C12,
-	}
-	b.sendFollowupEmbed(s, i, embed)
+	})
 }
 
 func (b *Bot) handleMatchSlash(s *discordgo.Session, i *discordgo.InteractionCreate, subcommand *discordgo.ApplicationCommandInteractionDataOption) {
@@ -1398,245 +1383,119 @@ func (b *Bot) SendWelcomeMessage() error {
 }
 
 func (b *Bot) CheckForNewMatches() error {
-	getLogger().Debug("Verificando nuevas partidas...")
+	b.matchCheckMu.Lock()
+	defer b.matchCheckMu.Unlock()
+
+	if b.db == nil || b.stratzClient == nil || !b.stratzClient.IsConfigured() {
+		return nil
+	}
 
 	users := b.userStore.GetAll()
-	getLogger().Infof("CheckForNewMatches: %d usuarios en JSON store", len(users))
 	if len(users) == 0 {
-		// Fallback: try PostgreSQL
-		if b.db != nil {
-			dbUsers, dbErr := b.db.GetAllUsers()
-			if dbErr == nil {
-				for _, u := range dbUsers {
-					if u.DiscordID != nil {
-						users[*u.DiscordID] = strconv.FormatInt(u.DotaID, 10)
-					}
-				}
+		dbUsers, err := b.db.GetAllUsers()
+		if err != nil {
+			return fmt.Errorf("load users: %w", err)
+		}
+		for _, user := range dbUsers {
+			if user.DiscordID != nil {
+				users[*user.DiscordID] = strconv.FormatInt(user.DotaID, 10)
 			}
-			getLogger().Infof("CheckForNewMatches: %d usuarios desde PostgreSQL", len(users))
 		}
-		if len(users) == 0 {
-			getLogger().Info("No hay usuarios registrados")
-			return nil
-		}
-	}
-
-	// Obtener canal de notificaciones
-	channelID, err := b.userStore.GetChannel()
-	if err != nil || channelID == "" {
-		channelID = b.config.NotificationChannelID
-		if channelID == "" {
-			getLogger().Info("No hay canal de notificaciones configurado")
-			return nil
-		}
-	}
-	getLogger().Infof("CheckForNewMatches: canal=%s", channelID)
-
-	// Validar que el channelID sea válido
-	if !isValidSnowflake(channelID) {
-		getLogger().Warnf("ID de canal inválido: %s. Saltando verificación de partidas.", channelID)
-		return nil
-	}
-
-	if b.stratzClient == nil || !b.stratzClient.IsConfigured() {
-		getLogger().Warn("Stratz no configurado, omitiendo verificación de partidas")
-		return nil
 	}
 
 	for discordID, accountID := range users {
-		lastMatchID, hasLastMatch := b.userStore.GetLastMatch(discordID)
-
-		accountIDInt, errParse := strconv.ParseInt(accountID, 10, 64)
-		if errParse != nil {
+		dotaID, err := strconv.ParseInt(accountID, 10, 64)
+		if err != nil {
 			getLogger().Warnf("account_id inválido para %s: %s", discordID, accountID)
 			continue
 		}
-
-		// Partidas recientes desde Stratz
-		matches, err := b.stratzClient.GetPlayerRecentMatches(accountIDInt, 5)
+		checkpoint, hasCheckpoint, err := b.db.GetLastProcessedMatch(dotaID)
 		if err != nil {
-			getLogger().Errorf("Error obteniendo partidas Stratz para %s (dota_id=%d): %v", accountID, accountIDInt, err)
+			getLogger().Errorf("checkpoint dota_id=%d: %v", dotaID, err)
 			continue
 		}
-		getLogger().Infof("Stratz matches para dota_id=%d: %d encontradas", accountIDInt, len(matches))
-
-		if len(matches) == 0 {
-			continue
-		}
-
-		latestStratzMatch := matches[0]
-
-		// Skip if already processed
-		if hasLastMatch && latestStratzMatch.ID == lastMatchID {
-			continue
-		}
-
-		getLogger().Infof("Nueva partida detectada para %s: %d", accountID, latestStratzMatch.ID)
-
-		// Detalles de la partida desde Stratz
-		matchDetailsStratz, err := b.stratzClient.GetMatch(latestStratzMatch.ID)
+		matches, err := b.stratzClient.GetPlayerRecentMatches(dotaID, 5)
 		if err != nil {
-			getLogger().Errorf("Error obteniendo detalles partida %d: %v", latestStratzMatch.ID, err)
+			getLogger().Errorf("recent matches dota_id=%d: %v", dotaID, err)
 			continue
 		}
-
-		// Si PARSED=true: solo notificar cuando la partida esté parseada (parsedDateTime > 0)
-		if b.config.RequireParsed && (matchDetailsStratz == nil || !dota.IsMatchParsed(matchDetailsStratz)) {
-			parsedVal := "nil match"
-			if matchDetailsStratz != nil {
-				if matchDetailsStratz.ParsedDateTime == nil {
-					parsedVal = "parsedDateTime=null"
-				} else {
-					parsedVal = fmt.Sprintf("parsedDateTime=%d", *matchDetailsStratz.ParsedDateTime)
-				}
-			}
-			getLogger().Infof("Partida %d esperando parseo (%s), reintentando siguiente ciclo", latestStratzMatch.ID, parsedVal)
-			if matchDetailsStratz != nil {
-				if errParse := b.stratzClient.RequestParseMatch(latestStratzMatch.ID); errParse != nil {
-					getLogger().Debugf("RequestParseMatch para %d: %v", latestStratzMatch.ID, errParse)
-				}
-			}
-			// Track in memory for /dota queue
-			heroName := ""
-			if matchDetailsStratz != nil {
-				for _, sp := range matchDetailsStratz.Players {
-					if sp.SteamAccountID == accountIDInt {
-						heroName = b.dotaClient.GetHeroName(sp.HeroID)
-						break
-					}
-				}
-			}
-			if _, exists := b.pendingMatches[discordID]; !exists {
-				playerLabel, _ := b.getPlayerNameAndAvatar(accountID, accountIDInt)
-				if playerLabel == "" {
-					playerLabel = accountID
-				}
-				b.pendingMatches[discordID] = pendingMatch{
-					MatchID:    latestStratzMatch.ID,
-					HeroName:   heroName,
-					PlayerName: playerLabel,
-					DetectedAt: time.Now(),
-				}
-			}
-			// No actualizar lastMatchID: en el siguiente ciclo se reintentará
-			continue
+		if err := discoverPlayerMatches(b.db, matches, checkpoint, hasCheckpoint, dotaID, discordID); err != nil {
+			getLogger().Errorf("discover matches dota_id=%d: %v", dotaID, err)
 		}
-
-		// Re-fetch match after short delay to get freshest IMP/Award data from Stratz
-		if matchDetailsStratz != nil && dota.IsMatchParsed(matchDetailsStratz) {
-			getLogger().Infof("Partida %d parseada, esperando 30s y re-fetching antes de notificar", latestStratzMatch.ID)
-			time.Sleep(30 * time.Second)
-			if refreshed, errRefresh := b.stratzClient.GetMatch(latestStratzMatch.ID); errRefresh == nil {
-				matchDetailsStratz = refreshed
-			}
-		} else {
-			getLogger().Infof("Partida %d procesando sin parsedDateTime (RequireParsed=%v)", latestStratzMatch.ID, b.config.RequireParsed)
-		}
-
-		// Buscar al jugador en la partida
-		var playerStratz *dota.StratzPlayer
-		for i := range matchDetailsStratz.Players {
-			if matchDetailsStratz.Players[i].SteamAccountID == accountIDInt {
-				playerStratz = &matchDetailsStratz.Players[i]
-				break
-			}
-		}
-		if playerStratz == nil {
-			getLogger().Errorf("Jugador %s no encontrado en partida %d", accountID, latestStratzMatch.ID)
-			continue
-		}
-
-		profileStratz, _ := b.stratzClient.GetPlayerProfile(accountIDInt)
-
-		// Convertir a tipos dota para sendMatchNotification
-		matchDetails := dota.StratzMatchToMatchResponse(matchDetailsStratz)
-		var player *dota.Player
-		for j := range matchDetails.Players {
-			if matchDetails.Players[j].AccountID == int(accountIDInt) {
-				player = &matchDetails.Players[j]
-				break
-			}
-		}
-		if player == nil {
-			retryKey := fmt.Sprintf("%s:%d", discordID, latestStratzMatch.ID)
-			b.matchRetries[retryKey]++
-			retries := b.matchRetries[retryKey]
-			ids := make([]int, len(matchDetails.Players))
-			for j, p := range matchDetails.Players {
-				ids[j] = p.AccountID
-			}
-			getLogger().Warnf("Jugador dota_id=%d no encontrado en partida %d (intento %d). AccountIDs en match: %v", accountIDInt, latestStratzMatch.ID, retries, ids)
-			if retries >= 5 {
-				getLogger().Warnf("Máx reintentos para partida %d de %s — omitiendo definitivamente", latestStratzMatch.ID, accountID)
-				_ = b.userStore.SetLastMatch(discordID, latestStratzMatch.ID)
-				delete(b.matchRetries, retryKey)
-			}
-			continue
-		}
-		// Clear retry counter on success
-		delete(b.matchRetries, fmt.Sprintf("%s:%d", discordID, latestStratzMatch.ID))
-
-		var profile *dota.PlayersResponse
-		if profileStratz != nil {
-			profile = &dota.PlayersResponse{}
-			profile.Profile.Personaname = profileStratz.Name
-			profile.Profile.Avatarfull = profileStratz.Avatar
-			profile.Profile.AccountID = int(profileStratz.SteamAccountID)
-			profile.RankBracket = profileStratz.RankBracket
-		}
-		// Nombre y avatar: fallback a OpenDota si Stratz no devuelve
-		if b.dotaClient != nil {
-			profileOD, errOD := b.dotaClient.GetPlayerProfile(accountID)
-			if errOD == nil && profileOD != nil {
-				if profile == nil {
-					profile = &dota.PlayersResponse{}
-					profile.Profile.AccountID = int(accountIDInt)
-					if profileStratz != nil {
-						profile.Profile.Personaname = profileStratz.Name
-						profile.RankBracket = profileStratz.RankBracket
-					}
-				}
-				if profileOD.Profile.Personaname != "" && profile.Profile.Personaname == "" {
-					profile.Profile.Personaname = profileOD.Profile.Personaname
-				}
-				if profileOD.Profile.Avatarfull != "" && profile.Profile.Avatarfull == "" {
-					profile.Profile.Avatarfull = profileOD.Profile.Avatarfull
-				}
-			}
-		}
-
-		if err := b.sendMatchNotification(channelID, matchDetails, player, profile, accountID); err != nil {
-			getLogger().Errorf("Error enviando notificación: %v", err)
-			continue
-		}
-
-		// Save new match to PostgreSQL so ranking reflects it
-		if b.db != nil {
-			b.storeNewMatchToDB(matchDetailsStratz, playerStratz, accountIDInt)
-			_ = b.db.MarkParseDone(latestStratzMatch.ID)
-		}
-		delete(b.pendingMatches, discordID)
-
-		if err := b.userStore.SetLastMatch(discordID, latestStratzMatch.ID); err != nil {
-			getLogger().Errorf("Error guardando última partida: %v", err)
-		}
-
-		time.Sleep(2 * time.Second)
 	}
 
+	channelID, err := b.userStore.GetChannel()
+	if err != nil || channelID == "" {
+		channelID = b.config.NotificationChannelID
+	}
+	if !isValidSnowflake(channelID) {
+		getLogger().Warn("No hay canal de notificaciones válido; cola queda pendiente")
+		return nil
+	}
+
+	err = processParseQueue(b.db, b.stratzClient, parseQueueBatchSize, time.Now(), func(row dbpkg.ParseQueueRow, match *dota.StratzMatch) error {
+		return b.handleParsedQueueRow(channelID, row, match)
+	})
+	if err != nil {
+		getLogger().Warnf("parse queue: %v", err)
+	}
 	return nil
 }
 
+func (b *Bot) handleParsedQueueRow(channelID string, row dbpkg.ParseQueueRow, match *dota.StratzMatch) error {
+	var playerStratz *dota.StratzPlayer
+	for i := range match.Players {
+		if match.Players[i].SteamAccountID == row.DotaID {
+			playerStratz = &match.Players[i]
+			break
+		}
+	}
+	if playerStratz == nil {
+		if row.AttemptCount >= 4 {
+			getLogger().Warnf("match %d missing dota_id=%d after %d attempts; dropping poison row", row.MatchID, row.DotaID, row.AttemptCount+1)
+			return nil
+		}
+		_ = b.db.IncrementParseAttempt(row.MatchID, row.DotaID)
+		return fmt.Errorf("dota_id %d not found in match", row.DotaID)
+	}
+
+	accountID := strconv.FormatInt(row.DotaID, 10)
+	profileStratz, _ := b.stratzClient.GetPlayerProfile(row.DotaID)
+	var profile *dota.PlayersResponse
+	if profileStratz != nil {
+		profile = &dota.PlayersResponse{}
+		profile.Profile.Personaname = profileStratz.Name
+		profile.Profile.Avatarfull = profileStratz.Avatar
+		profile.Profile.AccountID = int(profileStratz.SteamAccountID)
+		profile.RankBracket = profileStratz.RankBracket
+	}
+
+	matchDetails := dota.StratzMatchToMatchResponse(match)
+	var player *dota.Player
+	for i := range matchDetails.Players {
+		if matchDetails.Players[i].AccountID == int(row.DotaID) {
+			player = &matchDetails.Players[i]
+			break
+		}
+	}
+	if player == nil {
+		return fmt.Errorf("converted player %d not found", row.DotaID)
+	}
+	if err := b.sendMatchNotification(channelID, matchDetails, player, profile, accountID); err != nil {
+		return err
+	}
+	return b.storeNewMatchToDB(match, playerStratz, row.DotaID)
+}
+
 // storeNewMatchToDB persists a freshly-detected match to PostgreSQL so the ranking reflects it.
-func (b *Bot) storeNewMatchToDB(m *dota.StratzMatch, p *dota.StratzPlayer, dotaID int64) {
+func (b *Bot) storeNewMatchToDB(m *dota.StratzMatch, p *dota.StratzPlayer, dotaID int64) error {
 	if m == nil || p == nil {
-		return
+		return errors.New("match or player is nil")
 	}
 	startTime := time.Unix(m.StartDateTime, 0).UTC()
 	if err := b.db.UpsertMatch(m.ID, startTime, m.DurationSeconds, int(m.GameMode), m.DidRadiantWin, true,
 		m.TopLaneOutcome, m.MidLaneOutcome, m.BottomLaneOutcome); err != nil {
-		getLogger().Warnf("storeNewMatch: upsert match %d: %v", m.ID, err)
-		return
+		return fmt.Errorf("storeNewMatch: upsert match %d: %w", m.ID, err)
 	}
 	won := (m.DidRadiantWin && p.IsRadiant) || (!m.DidRadiantWin && !p.IsRadiant)
 	mmrDelta := -25
@@ -1664,15 +1523,13 @@ func (b *Bot) storeNewMatchToDB(m *dota.StratzMatch, p *dota.StratzPlayer, dotaI
 		Won:         won,
 		MMRDelta:    mmrDelta,
 	}); err != nil {
-		getLogger().Warnf("storeNewMatch: upsert player_match %d/%d: %v", m.ID, dotaID, err)
-	} else {
-		getLogger().Infof("storeNewMatch: saved match %d for dota_id=%d", m.ID, dotaID)
-		if b.db != nil {
-			if err := b.db.RefreshLaneRecords([]int64{dotaID}); err != nil {
-				getLogger().Warnf("storeNewMatch: refresh lane records dota_id=%d: %v", dotaID, err)
-			}
-		}
+		return fmt.Errorf("storeNewMatch: upsert player_match %d/%d: %w", m.ID, dotaID, err)
 	}
+	getLogger().Infof("storeNewMatch: saved match %d for dota_id=%d", m.ID, dotaID)
+	if err := b.db.RefreshLaneRecords([]int64{dotaID}); err != nil {
+		getLogger().Warnf("storeNewMatch: refresh lane records dota_id=%d: %v", dotaID, err)
+	}
+	return nil
 }
 
 // RunStatsScheduler ejecuta en bucle y, a la hora STATS_TIME (HH:MM), envía stats de todos los registrados al canal de notificaciones.
@@ -2444,37 +2301,37 @@ func (b *Bot) sendMatchNotification(channelID string, match *dota.MatchResponse,
 	// Try PNG path when DB is available (new mode)
 	if b.db != nil {
 		matchData := ranking.MatchRenderData{
-			PlayerName:      personaname,
-			HeroName:        heroName,
-			GameMode:        gameModeDisplayName,
-			RankBracket:     rankBracket,
-			IsWin:           isWin,
-			KDA:             fmt.Sprintf("%d/%d/%d (%.2f KDA)", player.Kills, player.Deaths, player.Assists, player.KDA),
-			Duration:        dota.FormatDuration(match.Duration),
-			Level:           player.Level,
-			RadiantScore:    match.RadiantScore,
-			DireScore:       match.DireScore,
-			GPM:             player.GoldPerMin,
-			XPM:             player.XpPerMin,
-			IMP:             formatIMP(player.Imp),
-			HeroRecord:      heroRecordText,
-			LaneInfo:        laneInfo,
+			PlayerName:        personaname,
+			HeroName:          heroName,
+			GameMode:          gameModeDisplayName,
+			RankBracket:       rankBracket,
+			IsWin:             isWin,
+			KDA:               fmt.Sprintf("%d/%d/%d (%.2f KDA)", player.Kills, player.Deaths, player.Assists, player.KDA),
+			Duration:          dota.FormatDuration(match.Duration),
+			Level:             player.Level,
+			RadiantScore:      match.RadiantScore,
+			DireScore:         match.DireScore,
+			GPM:               player.GoldPerMin,
+			XPM:               player.XpPerMin,
+			IMP:               formatIMP(player.Imp),
+			HeroRecord:        heroRecordText,
+			LaneInfo:          laneInfo,
 			LaneOutcome:       laneSummary,
-				TopLaneOutcome:    match.TopLaneOutcome,
-				MidLaneOutcome:    match.MidLaneOutcome,
-				BottomLaneOutcome: match.BottomLaneOutcome,
-			HeroDamage:      player.HeroDamage,
-			TowerDamage:     player.TowerDamage,
-			HeroHealing:     player.HeroHealing,
-			Streak:          streakText,
-			MatchID:         match.MatchID,
-			AnalysisOutcome: formatAnalysisOutcome(match.AnalysisOutcome),
-			UpdatedAt:       time.Now(),
-			HeroImgBytes:    heroImgBytes,
-			AvatarBytes:     avatarBytes,
-			RadiantPlayers:  radiantMatchPlayers,
-			DirePlayers:     direMatchPlayers,
-			RadiantWon:      match.RadiantWin != nil && *match.RadiantWin,
+			TopLaneOutcome:    match.TopLaneOutcome,
+			MidLaneOutcome:    match.MidLaneOutcome,
+			BottomLaneOutcome: match.BottomLaneOutcome,
+			HeroDamage:        player.HeroDamage,
+			TowerDamage:       player.TowerDamage,
+			HeroHealing:       player.HeroHealing,
+			Streak:            streakText,
+			MatchID:           match.MatchID,
+			AnalysisOutcome:   formatAnalysisOutcome(match.AnalysisOutcome),
+			UpdatedAt:         time.Now(),
+			HeroImgBytes:      heroImgBytes,
+			AvatarBytes:       avatarBytes,
+			RadiantPlayers:    radiantMatchPlayers,
+			DirePlayers:       direMatchPlayers,
+			RadiantWon:        match.RadiantWin != nil && *match.RadiantWin,
 		}
 		gen := ranking.NewImageGenerator()
 		imgBytes, renderErr := gen.RenderMatch(matchData)

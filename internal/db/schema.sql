@@ -18,12 +18,39 @@ CREATE TABLE IF NOT EXISTS matches (
 );
 
 CREATE TABLE IF NOT EXISTS parse_queue (
-    match_id      BIGINT PRIMARY KEY REFERENCES matches(match_id),
+    match_id      BIGINT NOT NULL,
+    dota_id       BIGINT NOT NULL,
+    discord_id    VARCHAR(20) NOT NULL,
     enqueued_at   TIMESTAMPTZ DEFAULT NOW(),
     last_attempt  TIMESTAMPTZ,
     attempt_count INT DEFAULT 0,
-    status        VARCHAR(20) DEFAULT 'pending'
+    status        VARCHAR(20) DEFAULT 'pending',
+    PRIMARY KEY (match_id, dota_id)
 );
+
+-- Migrate the legacy match-only queue. Those rows lack recipient identity and
+-- cannot be processed safely, so recent-match discovery will repopulate them.
+ALTER TABLE parse_queue ADD COLUMN IF NOT EXISTS dota_id BIGINT;
+ALTER TABLE parse_queue ADD COLUMN IF NOT EXISTS discord_id VARCHAR(20);
+DELETE FROM parse_queue WHERE dota_id IS NULL OR discord_id IS NULL;
+ALTER TABLE parse_queue ALTER COLUMN dota_id SET NOT NULL;
+ALTER TABLE parse_queue ALTER COLUMN discord_id SET NOT NULL;
+ALTER TABLE parse_queue DROP CONSTRAINT IF EXISTS parse_queue_match_id_fkey;
+DO $$
+DECLARE
+    current_pk TEXT;
+BEGIN
+    SELECT pg_get_constraintdef(oid)
+      INTO current_pk
+      FROM pg_constraint
+     WHERE conrelid = 'parse_queue'::regclass AND contype = 'p';
+    IF current_pk IS DISTINCT FROM 'PRIMARY KEY (match_id, dota_id)' THEN
+        ALTER TABLE parse_queue DROP CONSTRAINT IF EXISTS parse_queue_pkey;
+        ALTER TABLE parse_queue ADD CONSTRAINT parse_queue_pkey PRIMARY KEY (match_id, dota_id);
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_parse_queue_pending_order
+    ON parse_queue (match_id DESC) WHERE status = 'pending';
 
 CREATE TABLE IF NOT EXISTS player_matches (
     match_id      BIGINT REFERENCES matches(match_id),

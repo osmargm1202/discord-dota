@@ -154,44 +154,58 @@ func (d *DB) SetLastProcessedMatch(dotaID, matchID int64) error {
 
 // ---- Parse queue ----
 
-func (d *DB) EnqueueParse(matchID int64) error {
+// ParseQueueRow is one registered player's pending match notification.
+type ParseQueueRow struct {
+	MatchID      int64
+	DotaID       int64
+	DiscordID    string
+	EnqueuedAt   time.Time
+	LastAttempt  sql.NullTime
+	AttemptCount int
+}
+
+func (d *DB) EnqueueParse(matchID, dotaID int64, discordID string) error {
 	_, err := d.Exec(`
-		INSERT INTO parse_queue (match_id) VALUES ($1)
-		ON CONFLICT (match_id) DO NOTHING
-	`, matchID)
+		INSERT INTO parse_queue (match_id, dota_id, discord_id) VALUES ($1, $2, $3)
+		ON CONFLICT (match_id, dota_id) DO NOTHING
+	`, matchID, dotaID, discordID)
 	return err
 }
 
-func (d *DB) MarkParseDone(matchID int64) error {
-	_, err := d.Exec(`UPDATE parse_queue SET status='done' WHERE match_id=$1`, matchID)
+func (d *DB) MarkParseDone(matchID, dotaID int64) error {
+	_, err := d.Exec(`UPDATE parse_queue SET status='done' WHERE match_id=$1 AND dota_id=$2`, matchID, dotaID)
 	return err
 }
 
-func (d *DB) GetPendingParseQueue() ([]int64, error) {
+func (d *DB) GetPendingParseQueue(limit int) ([]ParseQueueRow, error) {
 	rows, err := d.Query(`
-		SELECT match_id FROM parse_queue WHERE status='pending' ORDER BY enqueued_at
-	`)
+		SELECT match_id, dota_id, discord_id, enqueued_at, last_attempt, attempt_count
+		FROM parse_queue
+		WHERE status='pending'
+		ORDER BY match_id DESC, dota_id
+		LIMIT $1
+	`, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []int64
+	var queue []ParseQueueRow
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var row ParseQueueRow
+		if err := rows.Scan(&row.MatchID, &row.DotaID, &row.DiscordID, &row.EnqueuedAt, &row.LastAttempt, &row.AttemptCount); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		queue = append(queue, row)
 	}
-	return ids, rows.Err()
+	return queue, rows.Err()
 }
 
-func (d *DB) IncrementParseAttempt(matchID int64) error {
+func (d *DB) IncrementParseAttempt(matchID, dotaID int64) error {
 	_, err := d.Exec(`
 		UPDATE parse_queue
 		SET attempt_count = attempt_count + 1, last_attempt = NOW()
-		WHERE match_id = $1
-	`, matchID)
+		WHERE match_id = $1 AND dota_id = $2
+	`, matchID, dotaID)
 	return err
 }
 

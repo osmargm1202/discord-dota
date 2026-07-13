@@ -72,18 +72,23 @@ func TestParseQueueRepository(t *testing.T) {
 	if err := database.IncrementParseAttempt(100, 1); err != nil {
 		t.Fatal(err)
 	}
+	var attemptCount int
+	var lastAttempt time.Time
+	if err := database.QueryRow(`
+		SELECT attempt_count, last_attempt FROM parse_queue
+		WHERE match_id=100 AND dota_id=1
+	`).Scan(&attemptCount, &lastAttempt); err != nil {
+		t.Fatal(err)
+	}
+	if attemptCount != 1 || lastAttempt.IsZero() {
+		t.Fatalf("attempt metadata not updated: count=%d last=%v", attemptCount, lastAttempt)
+	}
 	rows, err = database.GetPendingParseQueue(10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var attempted *ParseQueueRow
-	for i := range rows {
-		if rows[i].MatchID == 100 && rows[i].DotaID == 1 {
-			attempted = &rows[i]
-		}
-	}
-	if attempted == nil || attempted.AttemptCount != 1 || !attempted.LastAttempt.Valid {
-		t.Fatalf("attempt metadata not updated: %+v", attempted)
+	if len(rows) != 2 {
+		t.Fatalf("cooldown row should not consume pending batch: %+v", rows)
 	}
 
 	if err := database.MarkParseDone(100, 1); err != nil {

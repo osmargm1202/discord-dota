@@ -71,16 +71,19 @@ func processParseQueue(store parseQueueStore, client parseMatchClient, limit int
 
 	var rowErrors []error
 	for _, row := range rows {
+		if row.LastAttempt.Valid && now.Sub(row.LastAttempt.Time) < parseRetryInterval {
+			continue
+		}
 		match, err := client.GetMatch(row.MatchID)
 		if err != nil || match == nil {
-			_ = store.IncrementParseAttempt(row.MatchID, row.DotaID)
-			rowErrors = append(rowErrors, fmt.Errorf("get match %d: %w", row.MatchID, err))
+			attemptErr := store.IncrementParseAttempt(row.MatchID, row.DotaID)
+			if err == nil {
+				err = errors.New("Stratz returned nil match")
+			}
+			rowErrors = append(rowErrors, errors.Join(fmt.Errorf("get match %d: %w", row.MatchID, err), attemptErr))
 			continue
 		}
 		if !dota.IsMatchParsed(match) {
-			if row.LastAttempt.Valid && now.Sub(row.LastAttempt.Time) < parseRetryInterval {
-				continue
-			}
 			if err := client.RequestParseMatch(row.MatchID); err != nil {
 				rowErrors = append(rowErrors, fmt.Errorf("request parse %d: %w", row.MatchID, err))
 			}

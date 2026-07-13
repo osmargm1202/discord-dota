@@ -182,6 +182,7 @@ func (d *DB) GetPendingParseQueue(limit int) ([]ParseQueueRow, error) {
 		SELECT match_id, dota_id, discord_id, enqueued_at, last_attempt, attempt_count
 		FROM parse_queue
 		WHERE status='pending'
+		  AND (last_attempt IS NULL OR last_attempt <= NOW() - INTERVAL '10 minutes')
 		ORDER BY match_id DESC, dota_id
 		LIMIT $1
 	`, limit)

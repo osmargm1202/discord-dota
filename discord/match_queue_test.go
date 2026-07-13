@@ -124,15 +124,39 @@ func (f *fakeParseQueue) MarkParseDone(matchID, _ int64) error {
 
 type fakeParseClient struct {
 	matches   map[int64]*dota.StratzMatch
+	fetched   []int64
 	requested []int64
 }
 
 func (f *fakeParseClient) GetMatch(matchID int64) (*dota.StratzMatch, error) {
+	f.fetched = append(f.fetched, matchID)
 	return f.matches[matchID], nil
 }
 func (f *fakeParseClient) RequestParseMatch(matchID int64) error {
 	f.requested = append(f.requested, matchID)
 	return nil
+}
+
+func TestProcessParseQueueSkipsCooldownBeforeFetchingMatch(t *testing.T) {
+	now := time.Now()
+	queue := &fakeParseQueue{rows: []dbpkg.ParseQueueRow{{
+		MatchID: 10,
+		DotaID:  7,
+		LastAttempt: sql.NullTime{
+			Time:  now.Add(-time.Minute),
+			Valid: true,
+		},
+	}}}
+	client := &fakeParseClient{matches: map[int64]*dota.StratzMatch{10: {ID: 10}}}
+
+	if err := processParseQueue(queue, client, 5, now, func(dbpkg.ParseQueueRow, *dota.StratzMatch) error {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.fetched) != 0 {
+		t.Fatalf("fetched cooldown matches %v, want none", client.fetched)
+	}
 }
 
 func TestProcessParseQueueUnparsedRemainsPendingAndNewerParsedCompletes(t *testing.T) {

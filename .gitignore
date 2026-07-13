@@ -23,6 +23,9 @@ dota-discord-bot
 *.out
 go.work
 
+# Worktrees
+.worktrees/
+
 # IDE
 .vscode/
 .idea/
